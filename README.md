@@ -189,8 +189,10 @@ timeout still returns PID/jobId, a warning and exit 0. Track that job; do not di
 ### Automatic takeover of orphaned jobs
 
 MCP sessions automatically take over eligible jobs from the same project when the
-original dispatching session ends. This runs before the new server is ready and
-once per 60-second GC cycle, including when the new session starts before the old
+original dispatching session ends. It runs in the background right after the new
+server starts (usually within a few seconds; it never delays `ready` or the first tool
+call, and adopted jobs appear on the next `list_processes` / `get_result`), then once
+per 60-second GC cycle, including when the new session starts before the old
 one closes. No prompt or tool call is normally needed.
 
 The project directory is the MCP server's cwd, captured at construction and stored
@@ -201,7 +203,8 @@ is disabled; manual adoption is unaffected. New jobs must match that directory e
 older jobs without `projectDir` qualify when `workFolder` equals it or is underneath
 it, respecting path boundaries. When the project directory is a filesystem root or the
 home directory, older jobs qualify only when `workFolder` is exactly that directory
-(otherwise every project below it would match). Windows comparisons ignore case; other
+(otherwise every project below it would match); if the home directory cannot be
+resolved, only the root rule applies. Windows comparisons ignore case; other
 platforms preserve case. This prevents another project's active session from taking your jobs.
 
 Set `AI_CLI_AUTO_ADOPT` to `off`, `0`, `false` or `no` (trimmed, case-insensitive) to
@@ -217,8 +220,10 @@ closes, the worker would capture the project's orphans, including its own parent
 and the user's new session could not get them. Detection has two layers: the
 environment has `AI_CLI_WORKER=1` (not blocking when `AI_CLI_ALLOW_NESTED=1`, matching
 the dispatch guard), or a runner/worker of an unfinished job is among the MCP process's
-ancestors (a fallback for when codex drops the marker). If the ancestor chain cannot
-be confirmed, only automatic takeover is disabled.
+ancestors (a fallback for when codex drops the marker; a principal that is itself a
+job's worker is matched directly, otherwise at most 4 levels above the principal are
+checked, since a runner cannot sit higher). If the ancestor chain cannot be confirmed,
+only automatic takeover is disabled.
 
 | Interface | Action |
 | --- | --- |
@@ -238,7 +243,8 @@ principal is null (principal identification failed at dispatch), the dispatching
 server decides instead: the job is adoptable only once that server is confirmed ended;
 if it is still alive or cannot be confirmed, both automatic and manual adoption are
 refused, and the error says the dispatching MCP server is still present. Jobs with
-neither principal nor server are never adopted automatically; manual adoption is allowed. Adoption works throughout execution and for
+neither principal nor server are never adopted automatically (their candidate `autoAdopt`
+is false); manual adoption is allowed. Adoption works throughout execution and for
 30 minutes after completion, subject to the shared capacity limits below; it never
 restarts execution or extends retention. Adopted jobs immediately appear in this
 session's `list_processes`, `get_result`, `wait`, `peek` and `kill_process`.

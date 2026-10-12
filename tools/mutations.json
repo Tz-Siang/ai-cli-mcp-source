@@ -2153,8 +2153,8 @@
   {
     "name": "auto-adopt: remove project scope",
     "file": "src/core/job-store.ts",
-    "from": "export function inAutoAdoptScope(meta: Pick<JobMeta, 'projectDir' | 'workFolder'>, projectDir: string | null): boolean {\n  const directory = meta.projectDir === undefined ? meta.workFolder : meta.projectDir;\n  if (typeof directory !== 'string' || projectDir === null) return false;\n  const normalize = (value: string) => { const full = normalizeProjectDir(value); return process.platform === 'win32' ? full.toLowerCase() : full; };\n  const folder = normalize(directory), root = normalize(projectDir);\n  if (meta.projectDir !== undefined) return folder === root;\n  // 在磁碟根目錄或家目錄開 session 時，底下每個專案的舊 job 都落在前綴內；只接完全相同的 workFolder。\n  if (root === normalize(parse(root).root) || root === normalize(homedir())) return folder === root;\n  return folder === root || folder.startsWith(root.endsWith(sep) ? root : root + sep);\n}",
-    "to": "export function inAutoAdoptScope(meta: Pick<JobMeta, 'projectDir' | 'workFolder'>, projectDir: string | null): boolean {\n  return true;\n}",
+    "from": "export function inAutoAdoptScope(meta: Pick<JobMeta, 'projectDir' | 'workFolder'>, projectDir: string | null, home: string | null = currentHomeDir()): boolean {\n  const directory = meta.projectDir === undefined ? meta.workFolder : meta.projectDir;\n  if (typeof directory !== 'string' || projectDir === null) return false;\n  const normalize = (value: string) => { const full = normalizeProjectDir(value); return process.platform === 'win32' ? full.toLowerCase() : full; };\n  const folder = normalize(directory), root = normalize(projectDir);\n  if (meta.projectDir !== undefined) return folder === root;\n  // 在磁碟根目錄或家目錄開 session 時，底下每個專案的舊 job 都落在前綴內；只接完全相同的 workFolder。\n  if (root === normalize(parse(root).root) || home !== null && root === normalize(home)) return folder === root;\n  return folder === root || folder.startsWith(root.endsWith(sep) ? root : root + sep);\n}",
+    "to": "export function inAutoAdoptScope(meta: Pick<JobMeta, 'projectDir' | 'workFolder'>, projectDir: string | null, home: string | null = currentHomeDir()): boolean {\n  return true;\n}",
     "expect": "auto-adopt leaves different-project metadata unchanged",
     "script": "verify-adopt.mjs"
   },
@@ -2185,7 +2185,7 @@
   {
     "name": "auto-adopt: omit GC adoption",
     "file": "src/core/job-store.ts",
-    "from": "      await this.autoAdoptJobs();",
+    "from": "      if (adopt) await this.runAutoAdopt();",
     "to": "      // Mutation: omit automatic adoption.",
     "expect": "auto-adopt GC takes over after the original session ends",
     "script": "verify-adopt.mjs"
@@ -2297,7 +2297,7 @@
   {
     "name": "auto-adopt: legacy scope spans root and home directories",
     "file": "src/core/job-store.ts",
-    "from": "  if (root === normalize(parse(root).root) || root === normalize(homedir())) return folder === root;",
+    "from": "  if (root === normalize(parse(root).root) || home !== null && root === normalize(home)) return folder === root;",
     "to": "",
     "expect": "auto-adopt legacy scope at a filesystem root or home directory requires an exact workFolder",
     "script": "verify-adopt.mjs"
@@ -2372,6 +2372,86 @@
     "from": "model: meta.model ?? meta.resolvedModel ?? null,",
     "to": "model: meta.resolvedModel || meta.model || null,",
     "expect": "adopt candidate and list fields stay consistent",
+    "script": "verify-adopt.mjs"
+  },
+  {
+    "name": "adopt: walk the chain even when the principal is a job worker",
+    "file": "src/core/job-store.ts",
+    "from": "    if (workers.some(worker => sameIdentity(worker, principal))) return this.ancestry = 'worker';",
+    "to": "",
+    "expect": "adopt worker ancestry recognizes a principal that is a job worker without walking the chain",
+    "script": "verify-adopt.mjs"
+  },
+  {
+    "name": "adopt: walk past four ancestors",
+    "file": "src/core/job-store.ts",
+    "from": "      for (let depth = 0; depth < 4; depth++) {",
+    "to": "      for (let depth = 0; depth < 5; depth++) {",
+    "expect": "adopt worker ancestry stops four levels above the principal",
+    "script": "verify-adopt.mjs"
+  },
+  {
+    "name": "adopt: query through bootstrap-only runner ancestors",
+    "file": "src/core/job-store.ts",
+    "from": "        if (pending.has(pid)) return 'unknown';",
+    "to": "",
+    "expect": "adopt worker ancestry treats a bootstrap-only runner ancestor as unconfirmed",
+    "script": "verify-adopt.mjs"
+  },
+  {
+    "name": "adopt: ancestor without ppid counts as chain end",
+    "file": "src/core/job-store.ts",
+    "from": "        if (parent.ppid === undefined) return 'unknown';",
+    "to": "        if (parent.ppid === undefined) return this.ancestry = 'none';",
+    "expect": "adopt worker ancestry treats an ancestor without ppid as unconfirmed",
+    "script": "verify-adopt.mjs"
+  },
+  {
+    "name": "auto-adopt: GC timer check stays throttled",
+    "file": "src/core/job-store.ts",
+    "from": "void this.check(this.lookup, Date.now() - this.collectedAt >= GC_INTERVAL_MS)",
+    "to": "void this.check()",
+    "expect": "auto-adopt GC timer forces its due check past throttling",
+    "script": "verify-adopt.mjs"
+  },
+  {
+    "name": "auto-adopt: missing home directory crashes the store",
+    "file": "src/core/job-store.ts",
+    "from": "export function currentHomeDir(): string | null { try { return homedir(); } catch { return null; } }",
+    "to": "export function currentHomeDir(): string | null { return homedir(); }",
+    "expect": "auto-adopt survives an unavailable home directory and candidate failures",
+    "script": "verify-adopt.mjs"
+  },
+  {
+    "name": "auto-adopt: candidate failure aborts the lost check",
+    "file": "src/core/job-store.ts",
+    "from": "      if (autoDue) try { batch = this.autoAdoptMetas(); } catch (error) { console.error('ai-cli jobs auto-adopt candidates:', error); }",
+    "to": "      if (autoDue) batch = this.autoAdoptMetas();",
+    "expect": "auto-adopt survives an unavailable home directory and candidate failures",
+    "script": "verify-adopt.mjs"
+  },
+  {
+    "name": "adopt candidates: flag ownerless jobs for automatic takeover",
+    "file": "src/core/job-store.ts",
+    "from": "autoAdopt && state !== 'ownerless' && inAutoAdoptScope",
+    "to": "autoAdopt && inAutoAdoptScope",
+    "expect": "adopt null principal defers to the dispatching MCP server",
+    "script": "verify-adopt.mjs"
+  },
+  {
+    "name": "auto-adopt: startup takeover blocks ready",
+    "file": "src/core/job-store.ts",
+    "from": "    this.scan(); await this.check(); if (!this.readOnly) { this.collect(); await this.collectAll(false); }",
+    "to": "    this.scan(); await this.check(); if (!this.readOnly) { this.collect(); await this.collectAll(); }",
+    "expect": "auto-adopt runs after ready without blocking it",
+    "script": "verify-adopt.mjs"
+  },
+  {
+    "name": "auto-adopt: skip the background startup takeover",
+    "file": "src/core/job-store.ts",
+    "from": "this.ready.then(() => this.runAutoAdopt(), () => {})",
+    "to": "this.ready.then(() => {}, () => {})",
+    "expect": "auto-adopt startup exposes all same-project orphan statuses",
     "script": "verify-adopt.mjs"
   },
   {

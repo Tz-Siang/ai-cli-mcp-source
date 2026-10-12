@@ -103,15 +103,17 @@ function normalizeProjectDir(directory: string): string {
   const full = resolve(directory);
   return full === parse(full).root ? full : full.replace(process.platform === 'win32' ? /[\\/]+$/ : /\/+$/, '');
 }
+/** 沒有 HOME（且查不到帳號家目錄）時 os.homedir() 會丟例外；取不到就只用根目錄規則。 */
+export function currentHomeDir(): string | null { try { return homedir(); } catch { return null; } }
 /** 新 job 精準比對 session 專案；舊 job 以 workFolder 的路徑邊界判定，不能搶走相似前綴的專案。 */
-export function inAutoAdoptScope(meta: Pick<JobMeta, 'projectDir' | 'workFolder'>, projectDir: string | null): boolean {
+export function inAutoAdoptScope(meta: Pick<JobMeta, 'projectDir' | 'workFolder'>, projectDir: string | null, home: string | null = currentHomeDir()): boolean {
   const directory = meta.projectDir === undefined ? meta.workFolder : meta.projectDir;
   if (typeof directory !== 'string' || projectDir === null) return false;
   const normalize = (value: string) => { const full = normalizeProjectDir(value); return process.platform === 'win32' ? full.toLowerCase() : full; };
   const folder = normalize(directory), root = normalize(projectDir);
   if (meta.projectDir !== undefined) return folder === root;
   // 在磁碟根目錄或家目錄開 session 時，底下每個專案的舊 job 都落在前綴內；只接完全相同的 workFolder。
-  if (root === normalize(parse(root).root) || root === normalize(homedir())) return folder === root;
+  if (root === normalize(parse(root).root) || home !== null && root === normalize(home)) return folder === root;
   return folder === root || folder.startsWith(root.endsWith(sep) ? root : root + sep);
 }
 class AdoptionError extends Error {
@@ -128,7 +130,7 @@ export interface AdoptCandidate {
  * `autoAdopt` 旗標同時反映開關與 worker 判定，不只是專案範圍。
  */
 export async function listAdoptCandidates(dir = jobStateDir(), lookup: IdentityLookup = lookupIdentities, principal: ProcessIdentity | null = null,
-  projectDir: string | null = currentProjectDir(), autoAdopt = autoAdoptSwitchOn() && !isNestedWorker()): Promise<AdoptCandidate[]> {
+  projectDir: string | null = currentProjectDir(), autoAdopt = autoAdoptSwitchOn() && !isNestedWorker(), home = currentHomeDir()): Promise<AdoptCandidate[]> {
   const listed = readJobMetas(dir).flatMap(({ jobId }) => {
     const directory = join(dir, 'jobs', jobId), meta = readJobMeta(directory, jobId, false);
     if (!meta || !meta.runner.started || meta.source !== 'mcp' || sameIdentity(meta.principal, principal)) return [];
@@ -157,7 +159,8 @@ export async function listAdoptCandidates(dir = jobStateDir(), lookup: IdentityL
     candidates.push({ pid: meta.pid, jobId: meta.jobId, agent: meta.agent, model: meta.model ?? meta.resolvedModel ?? null,
       status, startTime: meta.startTime, ...(endTime ? { endTime } : {}), workFolder: meta.workFolder,
       task: taskSummary(meta.task), principal: meta.principal ? { pid: meta.principal.pid, name: meta.principal.name } : null,
-      autoAdopt: autoAdopt && inAutoAdoptScope(meta, projectDir), projectDir: meta.projectDir ?? null });
+      // 無主 job 自動接管一律不接，旗標不能說會接。
+      autoAdopt: autoAdopt && state !== 'ownerless' && inAutoAdoptScope(meta, projectDir, home), projectDir: meta.projectDir ?? null });
   }
   return candidates;
 }
@@ -364,6 +367,12 @@ export function jobSummary(job: StoredJob, now = Date.now()): LiveJob {
 export class JobStore {
   readonly jobs = new Map<string, StoredJob>();
   readonly ready: Promise<void>;
+  /**
+   * 啟動那一輪自動接管的完成點。它在 ready 之後才在背景開始，不阻塞 ready（祖先鏈查詢在 Windows 每層約 430 ms）；
+   * 只供測試與診斷等待，工具呼叫不必等它——接管成功會 scan，下一次 list／result 就看得到。
+   */
+  readonly autoAdoptSettled: Promise<void>;
+  private adopting?: Promise<void>;
   private server: ProcessIdentity | null = null; private principal: ProcessIdentity | null = null;
   private timer?: NodeJS.Timeout; private checking?: Promise<void>;
   private checkedAt = -Infinity;
@@ -379,9 +388,11 @@ export class JobStore {
   /** 僅供測試：持有 adopt.lock 的同步臨界區內呼叫，預設不啟用。 */
   private adoptLockHeld?: () => void;
   readonly projectDir: string | null;
+  private readonly home = currentHomeDir();
   constructor(readonly dir = jobStateDir(), private source: 'mcp' | 'cli' = 'cli', private readOnly = false, private lookup: IdentityLookup = lookupIdentities, projectDir: string | null = currentProjectDir()) {
     this.projectDir = projectDir === null ? null : normalizeProjectDir(projectDir);
     this.ready = this.initialize();
+    this.autoAdoptSettled = readOnly ? Promise.resolve() : this.ready.then(() => this.runAutoAdopt(), () => {});
     // 只有 GC 計時器到期那一路繞過 2 秒節流。
     if (!readOnly) { this.timer = setInterval(() => { void this.check(this.lookup, Date.now() - this.collectedAt >= GC_INTERVAL_MS).then(async () => {
       if (Date.now() - this.collectedAt >= GC_INTERVAL_MS) { this.collect(); await this.collectAll(); }
@@ -389,12 +400,19 @@ export class JobStore {
   }
   private async initialize(): Promise<void> {
     if (this.source === 'mcp') await this.identify();
-    this.scan(); await this.check(); if (!this.readOnly) { this.collect(); await this.collectAll(); }
+    // 啟動時只回收、不接管；接管交給 autoAdoptSettled 在 ready 之後背景進行，check 建好的身分快照留給它用。
+    this.scan(); await this.check(); if (!this.readOnly) { this.collect(); await this.collectAll(false); }
   }
-  private collectAll(): Promise<void> {
+  /** single-flight；錯誤只記 log。成功接管的 job 由 scan 納入。 */
+  private runAutoAdopt(): Promise<void> {
+    this.adopting ??= this.autoAdoptJobs().then(() => this.scan())
+      .catch(e => console.error('ai-cli jobs auto-adopt:', e)).finally(() => { this.adopting = undefined; });
+    return this.adopting;
+  }
+  private collectAll(adopt = true): Promise<void> {
     this.collecting ??= collectStoreFiles(this.dir, Date.now(), pids => this.cachedLookup(pids)).then(async () => {
-      // initialize 等待此步才 resolve ready；之後每個 GC 週期也走同一條路徑。
-      await this.autoAdoptJobs();
+      // 每個 GC 週期回收後接管；啟動那一輪（adopt=false）延到 ready 之後。
+      if (adopt) await this.runAutoAdopt();
       this.scan();
     }).catch(e => console.error('ai-cli jobs GC:', e)).finally(() => { this.collecting = undefined; this.collectedAt = Date.now(); });
     return this.collecting;
@@ -404,33 +422,48 @@ export class JobStore {
   private autoAdoptEnabled(): boolean { return this.source === 'mcp' && !this.readOnly && this.autoAdoptAllowed(); }
   /**
    * worker 底下的 MCP（cwd 常是同一個專案）不得接管，否則原 session 一關，它就把孤兒連同自己的父 job 接走。
-   * codex 只把白名單 env 轉給 MCP，標記可能漏掉，所以再看祖先鏈上有沒有尚未結束的 job 的 runner／worker。
-   * 查詢失敗、祖先還在卻查不到、或祖先是尚未落身分的 runner，都是無法確認。
+   * codex 只把白名單 env 轉給 MCP，標記可能漏掉，所以再看 principal 以上有沒有尚未結束的 job 的 runner／worker。
+   * 查詢失敗、祖先還在卻查不到、缺 ppid、或祖先是尚未落身分的 runner，都是無法確認。
+   *
+   * MCP→principal 那段 resolvePrincipal 已走過，從 principal 開始。worker 樹的形狀是
+   * runner →（Windows cmd shell）→（node 啟動器）→ CLI，principal 最低就是那支 CLI，
+   * 所以 runner 一定在 principal 之上 3 層內；查 4 層多留一層給沒被辨識成啟動器的 shim，超過就判 none。
+   * 每層一次 OS 查詢：2026-10-12 這台 Windows 實測 lookupIdentities 單次 408–1047 ms、5 次中位數 430 ms，
+   * 舊版無上限地查到鏈尾（5–8 層）會讓有孤兒候選時的 ready 慢好幾秒。
    */
   private async workerAncestry(): Promise<'worker' | 'none' | 'unknown'> {
     if (this.ancestry) return this.ancestry;
-    const targets: ProcessIdentity[] = [], pending = new Set<number>();
+    const targets: ProcessIdentity[] = [], workers: ProcessIdentity[] = [], pending = new Set<number>();
     for (const meta of readJobMetas(this.dir)) {
       if (readJobExit(join(this.dir, 'jobs', meta.jobId))) continue;
       if (!meta.runner.started) { if (mayBeAlive(meta.runner.pid)) pending.add(meta.runner.pid); continue; }
       targets.push(meta.runner, ...(meta.worker ? [meta.worker] : []));
+      if (meta.worker) workers.push(meta.worker);
     }
     // worker 啟動 MCP 前，runner 早已落 bootstrap；沒有未結束的 job 就不可能在 worker 底下。
     if (!targets.length && !pending.size) return this.ancestry = 'none';
+    const principal = this.principal;
+    if (!principal) return 'unknown';
+    // 快速路徑：principal 本身就是某個 job 的 worker（claude 直接被 runner 啟動），不必查鏈。
+    if (workers.some(worker => sameIdentity(worker, principal))) return this.ancestry = 'worker';
+    if (principal.ppid === undefined) return 'unknown';
     try {
-      const seen = new Set<number>();
-      for (let pid = process.ppid, depth = 0; depth < 16; depth++) {
+      const seen = new Set<number>([principal.pid]);
+      let pid = principal.ppid;
+      for (let depth = 0; depth < 4; depth++) {
         if (pid <= 0 || seen.has(pid)) return this.ancestry = 'none';
         seen.add(pid);
         if (pending.has(pid)) return 'unknown';
         const parent = (await this.lookup([pid])).get(pid);
         if (!parent) return mayBeAlive(pid) ? 'unknown' : this.ancestry = 'none';
-        if (!parent.started || parent.ppid === undefined) return 'unknown';
+        if (!parent.started) return 'unknown';
         if (targets.some(target => sameIdentity(target, parent))) return this.ancestry = 'worker';
+        if (parent.ppid === undefined) return 'unknown';
         pid = parent.ppid;
       }
-    } catch { /* 無法確認。 */ }
-    return 'unknown';
+    } catch { return 'unknown'; }
+    // runner 不可能在 principal 之上超過 4 層。
+    return this.ancestry = 'none';
   }
   /** 候選的 autoAdopt 旗標與實際自動接管用同一組條件。 */
   private async autoAdoptActive(): Promise<boolean> { return this.autoAdoptAllowed() && await this.workerAncestry() === 'none'; }
@@ -438,7 +471,7 @@ export class JobStore {
     return readJobMetas(this.dir).flatMap(listed => {
       const meta = readJobMeta(join(this.dir, 'jobs', listed.jobId), listed.jobId, false);
       return meta && meta.runner.started && meta.source === 'mcp' && !sameIdentity(meta.principal, this.principal)
-        && inAutoAdoptScope(meta, this.projectDir) ? [meta] : [];
+        && inAutoAdoptScope(meta, this.projectDir, this.home) ? [meta] : [];
     });
   }
   private async autoAdoptJobs(): Promise<void> {
@@ -494,7 +527,7 @@ export class JobStore {
     await this.ready;
     if (!this.principal) throw new Error('Cannot adopt: this MCP principal identity is unknown.');
     if (!this.server) throw new Error('Cannot adopt: this MCP server identity is unknown.');
-    if (pid === undefined && jobId === undefined) return listAdoptCandidates(this.dir, this.lookup, this.principal, this.projectDir, await this.autoAdoptActive());
+    if (pid === undefined && jobId === undefined) return listAdoptCandidates(this.dir, this.lookup, this.principal, this.projectDir, await this.autoAdoptActive(), this.home);
     if (pid !== undefined && (!Number.isInteger(pid) || pid <= 0)) throw new Error('pid must be a positive integer.');
     if (jobId !== undefined && (typeof jobId !== 'string' || !/^[0-9a-f-]{36}$/.test(jobId))) throw new Error('jobId must be a durable job UUID.');
     const metas = readJobMetas(this.dir);
@@ -520,7 +553,7 @@ export class JobStore {
     if (verified.source !== 'mcp') throw new AdoptionError('Only MCP jobs can be adopted.', 'ineligible');
     // GC 查詢後才新增或換主的 job，不能沿用同 PID 的另一個 principal 的查證結果。
     if (expectedOwner && (!unchangedOwner(verified.principal, expectedOwner.principal) || !unchangedOwner(verified.server, expectedOwner.server))) throw new AdoptionError('Job ownership changed after the GC identity batch.', 'changed');
-    if (automatic && !inAutoAdoptScope(verified, this.projectDir)) throw new AdoptionError('Job is outside this MCP project.', 'ineligible');
+    if (automatic && !inAutoAdoptScope(verified, this.projectDir, this.home)) throw new AdoptionError('Job is outside this MCP project.', 'ineligible');
     if (sameIdentity(verified.principal, this.principal)) return { pid: verified.pid, jobId: verified.jobId, alreadyOwned: true };
     const state = await ownerState(verified, lookup);
     if (state === 'alive') throw new AdoptionError('Cannot adopt: the original dispatching session is still alive.', 'ineligible');
@@ -548,7 +581,7 @@ export class JobStore {
       finally { closeSync(fd); }
       this.adoptLockHeld?.();
       const current = readJobMeta(directory, verified.jobId, false);
-      if (!current || !current.runner.started || current.source !== 'mcp' || !unchangedOwner(current.principal, verified.principal) || !unchangedOwner(current.server, verified.server) || automatic && !inAutoAdoptScope(current, this.projectDir)) {
+      if (!current || !current.runner.started || current.source !== 'mcp' || !unchangedOwner(current.principal, verified.principal) || !unchangedOwner(current.server, verified.server) || automatic && !inAutoAdoptScope(current, this.projectDir, this.home)) {
         throw new AdoptionError('這個 job 在驗證期間已被其他 session 接管或變更，請重新呼叫 adopt。', 'changed');
       }
       const meta: JobMeta = { ...current, principal: this.principal, server: this.server,
@@ -617,7 +650,9 @@ export class JobStore {
       }
       const expected = candidates.flatMap(meta => [meta.runner, ...(meta.worker ? [meta.worker] : [])]);
       const autoDue = gcDue && this.autoAdoptEnabled();
-      const batch = autoDue ? this.autoAdoptMetas() : [];
+      let batch: JobMeta[] = [];
+      // 候選篩選失敗只放棄這一輪自動接管，running／lost 判定照常。
+      if (autoDue) try { batch = this.autoAdoptMetas(); } catch (error) { console.error('ai-cli jobs auto-adopt candidates:', error); }
       // principal 為 null 時改查派工的 server；存活判斷只需建立時間，不抓命令列。
       if (autoDue) expected.push(...batch.flatMap(meta => { const owner = meta.principal ?? meta.server; return owner ? [owner] : []; }));
       // 同一 PID 的新 job 若帶不同 token，不能套用舊 job 的身分快取。

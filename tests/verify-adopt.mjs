@@ -3,15 +3,17 @@ import '../tools/stubs/catalog-test-env.mjs';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
+import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, parse, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { JobStore, atomicJson, autoAdoptSwitchOn, GC_INTERVAL_MS, inAutoAdoptScope, jobResult, listAdoptCandidates, readJobMetas, RETENTION_MS } from '../dist/core/job-store.js';
+import { JobStore, atomicJson, autoAdoptSwitchOn, currentHomeDir, GC_INTERVAL_MS, inAutoAdoptScope, jobResult, listAdoptCandidates, readJobMetas, RETENTION_MS } from '../dist/core/job-store.js';
 import { ProcessService } from '../dist/core/process-service.js';
 import { runCli } from '../dist/app/cli.js';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+const require = createRequire(import.meta.url);
 const temp = mkdtempSync(join(tmpdir(), 'ai-cli-adopt-'));
 const originalAutoAdopt = process.env.AI_CLI_AUTO_ADOPT;
 delete process.env.AI_CLI_AUTO_ADOPT;
@@ -73,7 +75,8 @@ async function automaticStore(dir, { projectDir = ROOT, useCwd = false, principa
     if (pids.includes(process.ppid)) found.set(process.ppid, { ppid: 0, ...principal });
     return found;
   };
-  const s = new JobStore(dir, source, readOnly, identities, useCwd ? undefined : projectDir); stores.push(s); await s.ready; return s;
+  // 啟動那一輪接管在 ready 之後背景進行；等它的完成點，不靠 sleep。
+  const s = new JobStore(dir, source, readOnly, identities, useCwd ? undefined : projectDir); stores.push(s); await s.ready; await s.autoAdoptSettled; return s;
 }
 async function gcCycle(s) { s.collectedAt = -Infinity; s.checkedAt = -Infinity; await s.check(undefined, true); s.collect(); await s.collectAll(); }
 function processService(s) { const ps = Object.create(ProcessService.prototype); ps.store = s; ps.processManager = new Map(); ps.ready = s.ready; return ps; }
@@ -323,7 +326,7 @@ try {
       assert(inAutoAdoptScope({ workFolder: 'C:\\A\\B\\child' }, 'c:\\a\\b\\'));
     }
   });
-  await test('auto-adopt ready exposes all same-project orphan statuses with ownership history', async () => {
+  await test('auto-adopt startup exposes all same-project orphan statuses with ownership history', async () => {
     const dir = caseDir(), fixtures = [fixture(dir, { meta: { projectDir: ROOT } }), fixture(dir, { exitCode: 0, meta: { projectDir: ROOT } }),
       fixture(dir, { exitCode: 1, meta: { projectDir: ROOT } }), fixture(dir, { runner: id('gone-runner'), meta: { projectDir: ROOT, worker: null } })];
     const s = await automaticStore(dir), ps = processService(s), listed = ps.listProcesses();
@@ -525,6 +528,7 @@ try {
     const s2 = await automaticStore(dir2); assert.deepEqual(s2.list().map(j => j.jobId), [b.meta.jobId]);
     const dir3 = caseDir(), c = fixture(dir3, { meta: { projectDir: ROOT, principal: null, server: null } }), beforeC = contents(c.path);
     const s3 = await automaticStore(dir3); await gcCycle(s3); assert.equal(s3.list().length, 0); assert.equal(contents(c.path), beforeC);
+    assert.deepEqual((await s3.adopt()).map(candidate => candidate.autoAdopt), [false], 'ownerless candidates are never adopted automatically');
     assert.equal((await s3.adopt(c.meta.pid)).adopted, true); assert.equal(metaOf(c).adoptedFrom[0].server, null);
   });
   await test('auto-adopt legacy scope at a filesystem root or home directory requires an exact workFolder', async () => {
@@ -571,11 +575,12 @@ try {
   await test('adopt lock refuses a second session inside the critical section', async () => {
     const dir = caseDir(), f = fixture(dir), a = await store(dir);
     const b = await store(dir, lookup, 'mcp', id('lock-session-b', true), id('lock-server-b', true));
-    let refused;
+    let refused, lockKept;
     // A 持有 lock 時，B 已完成非同步查證、直接進入同步提交。
-    a.adoptLockHeld = () => { try { b.commitAdoption(f.directory, metaOf(f), false); } catch (error) { refused = error; } };
+    a.adoptLockHeld = () => { try { b.commitAdoption(f.directory, metaOf(f), false); } catch (error) { refused = error; } lockKept = existsSync(f.lock); };
     assert.equal((await a.adopt(f.meta.pid)).adopted, true);
     assert(refused, 'B must be refused while A holds the lock'); assert.equal(refused.reason, 'locked'); assert.match(refused.message, /Adoption lock exists/);
+    assert.equal(lockKept, true, 'the refused session must not remove the holder lock');
     assert.deepEqual(metaOf(f).principal, ownPrincipal); assert.equal(metaOf(f).adoptedFrom.length, 1); assert(!existsSync(f.lock));
   });
   await test('auto-adopt due GC does not bypass throttling for wait and peek checks', async () => {
@@ -608,6 +613,90 @@ try {
     await s.adopt(f.meta.pid);
     assert.equal(s.list()[0].adopted, true); assert.equal(s.list()[0].recovered, undefined, 'adopted jobs are not same-principal recoveries');
     assert.equal(jobResult(s.get(f.meta.pid)).recovered, undefined);
+  });
+  await test('adopt worker ancestry recognizes a principal that is a job worker without walking the chain', async () => {
+    // claude 由 runner 直接啟動時 principal 就是 meta.worker；往上走會碰到查不到的祖先（無法確認），快速路徑必須先判 worker。
+    const dir = caseDir(), workerCli = id('worker-is-principal', true), hidden = id('fast-path-hidden'), queries = []; alive.add(hidden.pid);
+    const parentJob = fixture(dir, { meta: { projectDir: ROOT, worker: workerCli } }), before = contents(parentJob.path);
+    const s = await automaticStore(dir, { principal: { ...workerCli, ppid: hidden.pid }, customLookup: async pids => { queries.push(...pids); return lookup(pids); } });
+    await gcCycle(s); assert.equal(s.list().length, 0); assert.equal(contents(parentJob.path), before);
+    await assert.rejects(s.adopt(parentJob.meta.pid), /ai-cli worker/);
+    assert(!queries.includes(hidden.pid), 'fast path must not query ancestors');
+  });
+  await test('adopt worker ancestry stops four levels above the principal', async () => {
+    const dir = caseDir(), runner = { ...id('distant-runner', true), ppid: 0 }; rows.set(runner.pid, runner);
+    fixture(dir, { runner, meta: { projectDir: join(temp, 'elsewhere') } });
+    let parent = runner.pid; const ancestors = [];
+    for (let level = 4; level >= 1; level--) { const a = { ...id('ancestor-' + level, true), ppid: parent }; rows.set(a.pid, a); ancestors.push(a.pid); parent = a.pid; }
+    const orphan = fixture(dir, { meta: { projectDir: ROOT } }), queries = [];
+    const s = await automaticStore(dir, { principal: { ...id('deep-principal', true), ppid: parent }, customLookup: async pids => { queries.push(...pids); return lookup(pids); } });
+    assert.deepEqual(s.list().map(j => j.jobId), [orphan.meta.jobId], 'a runner five levels up is outside any worker tree');
+    assert.equal(queries.filter(pid => ancestors.includes(pid)).length, 4);
+  });
+  await test('adopt worker ancestry treats a bootstrap-only runner ancestor as unconfirmed', async () => {
+    const dir = caseDir(), runner = { pid: ++nextPid, started: '', name: 'runner' }; alive.add(runner.pid);
+    rows.set(runner.pid, { pid: runner.pid, started: 'bootstrap-runner-os', name: 'node', ppid: 0 });
+    fixture(dir, { bootstrap: true, runner, meta: { projectDir: join(temp, 'elsewhere') } });
+    const orphan = fixture(dir, { meta: { projectDir: ROOT } }), before = contents(orphan.path);
+    const s = await automaticStore(dir, { principal: { ...id('pending-chain', true), ppid: runner.pid } });
+    await gcCycle(s); assert.equal(s.list().length, 0); assert.equal(contents(orphan.path), before);
+    assert.equal((await s.adopt(orphan.meta.pid)).adopted, true, 'manual takeover stays available when ancestry is unconfirmed');
+  });
+  await test('adopt worker ancestry treats an ancestor without ppid as unconfirmed', async () => {
+    const dir = caseDir(), middle = id('ppid-less-ancestor', true);
+    const orphan = fixture(dir, { meta: { projectDir: ROOT } }), before = contents(orphan.path);
+    const s = await automaticStore(dir, { principal: { ...id('ppid-less-chain', true), ppid: middle.pid } });
+    await gcCycle(s); assert.equal(s.list().length, 0); assert.equal(contents(orphan.path), before);
+    assert.equal((await s.adopt(orphan.meta.pid)).adopted, true);
+  });
+  await test('auto-adopt GC timer forces its due check past throttling', async () => {
+    const dir = caseDir(), old = id('timer-owner', true), f = fixture(dir, { meta: { projectDir: ROOT, principal: old } });
+    const s = await automaticStore(dir); assert.equal(s.list().length, 0);
+    alive.delete(old.pid); rows.delete(old.pid);
+    // 未強制的 check 一律被節流；只有真實計時器帶 force 的那一路能重建身分快照並接管。
+    s.checkedAt = Date.now() + GC_INTERVAL_MS; s.collectedAt = -Infinity;
+    const deadline = Date.now() + 6000;
+    while (!s.list().length && Date.now() < deadline) await new Promise(done => setTimeout(done, 100));
+    assert.deepEqual(s.list().map(j => j.jobId), [f.meta.jobId]);
+  });
+  await test('auto-adopt survives an unavailable home directory and candidate failures', async () => {
+    const os = require('node:os'), realHome = os.homedir;
+    const dir = caseDir(), legacy = fixture(dir, { meta: { workFolder: join(ROOT, 'src') } });
+    os.homedir = () => { throw Object.assign(new Error('ENOENT: no such file or directory, uv_os_homedir'), { code: 'ENOENT' }); }; syncBuiltinESMExports();
+    let s;
+    try { assert.equal(currentHomeDir(), null); s = await automaticStore(dir); }
+    finally { os.homedir = realHome; syncBuiltinESMExports(); }
+    assert.deepEqual(s.list().map(j => j.jobId), [legacy.meta.jobId], 'root-only scope rule still applies without a home directory');
+    // 候選篩選丟例外時，同一輪的 lost 判定照常。
+    const dir2 = caseDir(), own = fixture(dir2, { meta: { projectDir: ROOT, principal: ownPrincipal, server: ownServer } }), logs = [], originalError = console.error;
+    const s2 = await automaticStore(dir2); assert.equal(s2.get(own.meta.pid).status, 'running');
+    s2.autoAdoptMetas = () => { throw new Error('synthetic candidate failure'); };
+    for (const pid of [own.meta.runner.pid, own.meta.worker.pid]) { alive.delete(pid); rows.delete(pid); }
+    console.error = (...args) => logs.push(args.map(String).join(' '));
+    try { s2.collectedAt = -Infinity; s2.checkedAt = -Infinity; await s2.check(undefined, true); }
+    finally { console.error = originalError; }
+    assert.equal(s2.get(own.meta.pid).status, 'lost'); assert(logs.some(line => line.includes('synthetic candidate failure')));
+  });
+  await test('auto-adopt runs after ready without blocking it', async () => {
+    // 祖先鏈查詢卡住時，ready 必須先 resolve；放行後接管完成，list 才看得到。
+    const dir = caseDir(), orphan = fixture(dir, { meta: { projectDir: ROOT } }), gate = id('slow-ancestor');
+    let release; const stuck = new Promise(done => { release = done; });
+    const principal = { ...id('slow-chain', true), ppid: gate.pid };
+    const identities = async pids => {
+      const found = await lookup(pids.filter(pid => pid !== process.pid && pid !== process.ppid));
+      if (pids.includes(gate.pid)) await stuck;
+      if (pids.includes(process.pid)) found.set(process.pid, ownServer);
+      if (pids.includes(process.ppid)) found.set(process.ppid, principal);
+      return found;
+    };
+    const s = new JobStore(dir, 'mcp', false, identities, ROOT); stores.push(s);
+    try {
+      const first = await Promise.race([s.ready.then(() => 'ready'), new Promise(done => setTimeout(() => done('timeout'), 3000))]);
+      assert.equal(first, 'ready', 'ready must not wait for the ancestor lookup');
+      assert.equal(s.list().length, 0, 'takeover is still waiting on the ancestor lookup');
+    } finally { release(); }
+    await s.autoAdoptSettled;
+    assert.deepEqual(s.list().map(j => j.jobId), [orphan.meta.jobId]);
   });
 } finally {
   for (const s of stores) s.dispose();

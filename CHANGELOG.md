@@ -14,7 +14,7 @@
   原派工 session 結束後，detached runner 仍繼續執行，
   但新 session 因 principal 隔離看不到 job；直接改寫 meta 身分的權宜做法曾被自動模式分類器當成偽造行程身分擋下。
   已實測 Claude Code 的 stdio MCP cwd 等於 session 工作目錄，因此以建構時 cwd 記錄 `projectDir`，只自動接同專案，
-  避免其他專案的活躍 session 搶走孤兒 job；舊 job 以 workFolder 的目錄邊界判定。ready 前與每個 GC 週期執行，
+  避免其他專案的活躍 session 搶走孤兒 job；舊 job 以 workFolder 的目錄邊界判定。啟動後在背景立刻進行（通常幾秒內，不阻塞 ready），之後每 60 秒的 GC 週期執行，
   原 principal 查詢併入 GC 批次；`AI_CLI_AUTO_ADOPT=off` 可停用。先確認原 principal 已死，再同步鎖定、重讀並比對
   principal／server，原子更新兩者並追加完整接管歷史；
   可接管時間為執行期間全程＋結束後 30 分鐘（另受共用容量上限限制），不重跑、不延長保留期。
@@ -24,6 +24,9 @@
   principal 為 null 時改看派工的 server，兩者皆 null 只能手動；專案目錄是根目錄或家目錄時舊 job 不套前綴；
   cwd 取不到不再讓 MCP 起不來；開關接受 off／0／false／no；刪 lock 失敗不蓋掉接管結果；存活查詢不再抓命令列；
   GC 到期只有計時器繞過節流；自動接管只讀該輪查詢快照；候選清單批次查詢、不讀 log；補真的撞上 lock 的測試。（Claude）
+  複審後補：祖先鏈先比對 principal 是否為 job 的 worker，否則只從 principal 往上查 4 層（Windows 單次查詢實測中位數 430 ms）；
+  家目錄取不到不再讓 check 失敗；無主候選的 `autoAdopt` 為 false；補 GC 計時器 force、bootstrap runner 祖先、缺 ppid 的測試。（Claude）
+  啟動那一輪接管改到 ready 之後背景進行：原本在 ready 路徑上走祖先鏈，有同專案孤兒時第一個工具呼叫要多等（verify-liveness 因此偶發失敗）。（Claude）
 - `dispatchGuidance` 的 Grok 那列改寫成實測定位：換一家視角的審查、知識萃取與文件查證用 `grok-4.7` medium。
   依據是 2026-10-10 六項 × 兩輪與 2026-10-12 第二回（真實 repo 跨 9 檔功能、網路查證）評測，grok-4.7 與 gpt-6.1-sol／sonnet
   客觀判分全部平手，差別只在速度與成本，所以日常 coding 不換；另寫明 Grok 會讀使用者的全域 CLAUDE.md 與 MCP 設定、曾把知識庫條目
