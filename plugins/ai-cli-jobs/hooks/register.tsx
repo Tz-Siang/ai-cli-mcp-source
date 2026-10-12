@@ -78,18 +78,56 @@ export function summary(list: AiCliJobsJob[]): string {
 export function eventLabel(text: string): string {
   return clip(text.replace(/^(?:item|turn|thread)\.[\w.-]+\s+/g, ''), 28)
 }
+/**
+ * The engine's two `$.mcp.call` failures each have one fix the user can apply right away; spell it out
+ * instead of the raw text, which the 28-column event label used to cut down to "ai-cli-jobs: $.mcp.call".
+ */
+export function failureText(why: string): string {
+  // auto mode's background refusal is the usual cause, but a deny rule or a hook refuses the same way, so keep its reason.
+  const refused = why.match(/\$\.mcp\.call\([^)]*\) refused:?\s*(.*)$/s)
+  if (refused) return `輪詢被拒：把 mcp__ai-cli__list_processes 加進 permissions.allow（原因：${clip(refused[1], 40) || '未提供'}）`
+  if (/no connected MCP tool\b/.test(why)) return '輪詢失敗：ai-cli MCP 未連線，用 /mcp 重連（server 名稱須為 ai-cli）'
+  return `輪詢失敗：${clip(why, 80) || '未知錯誤'}`
+}
+/** Poll failures are our own bounded text and must be read in full; vendor events keep the short label. */
+const isPollFailure = (text: string) => /^輪詢(?:失敗|被拒)：/.test(text)
 export function elapsed(sec: number): string {
   const s = Math.max(0, Math.floor(sec))
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
 }
 
+/** Folds one list_processes row into a job, the same way for jobs dispatched here and jobs adopted from elsewhere. */
+function applyRow(j: AiCliJobsJob, row: Record<string, unknown>, now: number): AiCliJobsJob {
+  const rawStatus = str(row.status)
+  const isKnownStatus = ['running', 'completed', 'failed'].includes(rawStatus)
+  const status: AiCliJobsJob['status'] = rawStatus === 'running' ? 'running' : rawStatus === 'completed' ? 'completed' : 'failed'
+  return {
+    ...j, status, agent: str(row.agent) || j.agent,
+    elapsedSec: typeof row.elapsedSec === 'number' && Number.isFinite(row.elapsedSec) ? row.elapsedSec : (now - j.startedAt) / 1000,
+    sinceLastOutputSec: typeof row.sinceLastOutputSec === 'number' ? row.sinceLastOutputSec : undefined,
+    lastEvent: isKnownStatus ? str(row.lastEvent) : [rawStatus, str(row.lastEvent)].filter(Boolean).join(' '),
+    ...(status === 'running' ? {} : { finishedAt: now }),
+  }
+}
+export const ADOPTED_TASK = '接管自前一個 session'
+/**
+ * The server adopts a same-project job when the MCP starts and on each 60 s GC pass, and the MCP may connect late
+ * or another session may end later, so look soon after the session starts and then once a minute while idle;
+ * while anything is running the regular poll sees them too.
+ */
+export const DISCOVER_FIRST_MS = 5_000
+export const DISCOVER_EVERY_MS = 60_000
+
   let poll: Timer | undefined
   let expiry: Timer | undefined
+  let discovery: Timer[] = []
   let busy = false
   let generation = 0
+  /** Adopted jobs already shown once, so one that was pruned is not brought back while the server still lists it. */
+  const seen = new Set<string>()
   function stop() {
-    poll?.cancel(); expiry?.cancel()
-    poll = undefined; expiry = undefined
+    poll?.cancel(); expiry?.cancel(); for (const t of discovery) t.cancel()
+    poll = undefined; expiry = undefined; discovery = []
   }
   async function synchronize($: EngineInterface) {
     const held = await read($, jobs)
@@ -117,7 +155,7 @@ export function elapsed(sec: number): string {
   }
   /** Keeps the tracked jobs running but shows why this poll told us nothing. */
   async function noteFailure($: EngineInterface, tracked: Set<number>, why: string) {
-    const lastEvent = `輪詢失敗：${clip(why, 80) || '未知錯誤'}`
+    const lastEvent = failureText(why)
     await update($, jobs, list => list.map(j => j.status === 'running' && tracked.has(j.pid) ? { ...j, lastEvent } : j))
   }
   async function refresh($: EngineInterface) {
@@ -141,21 +179,34 @@ export function elapsed(sec: number): string {
       if (!Array.isArray(rows)) return await noteFailure($, tracked, '回傳格式無法解析')
       const entries = rows.map(record).filter((v): v is Record<string, unknown> => !!v && runPid(v) !== undefined)
       const now = await $.clock.now()
-      await update($, jobs, list => list.map(j => {
-        if (j.status !== 'running' || !tracked.has(j.pid)) return j
-        const row = entries.find(v => runPid(v) === j.pid)
-        if (!row) return { ...j, status: 'untracked', lastEvent: '已不追蹤', finishedAt: now }
-        const rawStatus = str(row.status)
-        const isKnownStatus = ['running', 'completed', 'failed'].includes(rawStatus)
-        const status: AiCliJobsJob['status'] = rawStatus === 'running' ? 'running' : rawStatus === 'completed' ? 'completed' : 'failed'
-        return {
-          ...j, status, agent: str(row.agent) || j.agent,
-          elapsedSec: typeof row.elapsedSec === 'number' && Number.isFinite(row.elapsedSec) ? row.elapsedSec : (now - j.startedAt) / 1000,
-          sinceLastOutputSec: typeof row.sinceLastOutputSec === 'number' ? row.sinceLastOutputSec : undefined,
-          lastEvent: isKnownStatus ? str(row.lastEvent) : [rawStatus, str(row.lastEvent)].filter(Boolean).join(' '),
-          ...(status === 'running' ? {} : { finishedAt: now }),
+      // The updater stays pure (it may run again); what it saw is recorded in `adopted` and applied after.
+      let adopted: string[] = []
+      await update($, jobs, list => {
+        adopted = []
+        if (epoch !== generation) return list
+        const next = list.map(j => {
+          if (j.status !== 'running' || !tracked.has(j.pid)) return j
+          const row = entries.find(v => runPid(v) === j.pid)
+          if (!row) return { ...j, status: 'untracked' as const, lastEvent: '已不追蹤', finishedAt: now }
+          return applyRow(j, row, now)
+        })
+        // A job the server adopted from an ended session never passed through this session's run hook.
+        for (const row of entries) {
+          const key = str(row.jobId)
+          if (row.adopted !== true || !key || seen.has(key)) continue
+          // Seen even when already held (a resumed session keeps its rows), so a pruned row never comes back.
+          adopted.push(key)
+          const pid = runPid(row)!
+          if (next.some(j => j.pid === pid)) continue
+          const elapsedSec = typeof row.elapsedSec === 'number' && Number.isFinite(row.elapsedSec) ? row.elapsedSec : 0
+          next.push(applyRow({
+            pid, agent: str(row.agent) || 'ai-cli', model: str(row.model) || 'default', reasoningEffort: '',
+            task: ADOPTED_TASK, startedAt: now - elapsedSec * 1000, status: 'running', elapsedSec, lastEvent: '',
+          }, row, now))
         }
-      }))
+        return next
+      })
+      for (const key of adopted) seen.add(key)
     } catch (err) {
       // Retry next tick while retaining the last known state, but say why.
       if (epoch === generation) await noteFailure($, tracked, err instanceof Error ? err.message : String(err)).catch(() => {})
@@ -166,10 +217,17 @@ export function elapsed(sec: number): string {
   }
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
+    const epoch = generation
     await prune($)
+    for (const t of discovery) t.cancel()
+    discovery = epoch !== generation ? [] : [
+      $.clock.after(DISCOVER_FIRST_MS, () => { void refresh($) }),
+      $.clock.every(DISCOVER_EVERY_MS, () => { void refresh($) }),
+    ]
     return next(e)
   })
   on('session.end', async ($, e, next) => {
+    // `seen` outlives the session: /clear ends it with no new start, and the server keeps listing adopted jobs.
     generation++; stop()
     await update($, jobs, () => [])
     return next(e)
@@ -201,7 +259,7 @@ export const register: Register = on => {
       const seconds = j.status === 'running' ? Math.max(j.elapsedSec, (now - j.startedAt) / 1000) : j.elapsedSec
       const background = j.status === 'running' ? COLORS.running : j.status === 'completed' ? COLORS.completed : COLORS.failed
       return <Box key={`job-${j.pid}`} backgroundColor={background}>
-        <Text color={COLORS.text} bold>{`${glyph} ${j.agent}  ${j.model}${j.reasoningEffort ? ` (${j.reasoningEffort})` : ''}  ${j.task}  ${elapsed(seconds)}  ${eventLabel(j.lastEvent)}`}</Text>
+        <Text color={COLORS.text} bold>{`${glyph} ${j.agent}  ${j.model}${j.reasoningEffort ? ` (${j.reasoningEffort})` : ''}  ${j.task}  ${elapsed(seconds)}  ${isPollFailure(j.lastEvent) ? j.lastEvent : eventLabel(j.lastEvent)}`}</Text>
       </Box>
     })}</Box>
   })

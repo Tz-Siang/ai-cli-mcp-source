@@ -120,9 +120,20 @@ export const DISPATCH_GUIDANCE: ReadonlyArray<{
   note: string;
 }> = [
   {
-    situation: '需要 xAI Grok CLI 的程式碼／文字工作',
-    model: 'grok-4.7 / grok-4.7-build-fast',
-    note: '獨立 Grok CLI pipe 後端，持久化 job 可接回；模型清單查 grok models，low/medium/high/xhigh effort 已實測（grok 1.0.50）。使用 Grok CLI 自己的登入，不是 direct-api provider。',
+    situation: '換一家視角的審查、知識萃取與文件查證（xAI Grok CLI）',
+    model: 'grok-4.7',
+    reasoningEffort: 'medium',
+    note:
+      '2026-10-10 依使用者工作流六項 × 兩輪評測（派工紀律、實作、審查、知識萃取、協定逆向、長文件），'
+      + '以隱藏測試或事先備好的答案判分：grok-4.7、grok-4.7-build-fast、gpt-6.1-sol 客觀項目全過、正確率平手，'
+      + '差別只在速度與成本。grok-4.7 審查約 195–273 秒、封包解析約 269–319 秒，固定偏慢；'
+      + '知識萃取／文件查證每次名目約 $0.02–0.05。build-fast 名目成本約 2 倍，只在要快時值得。'
+      + '日常 coding 沒有理由換掉 gpt-6.1-sol。'
+      + '⚠️ Grok 會讀使用者的全域 CLAUDE.md 與 MCP 設定：同日曾自行呼叫知識庫，把約 19.5 KB 條目當工具輸出送進 xAI；'
+      + '不希望內容外送時，prompt 要寫明「不要使用知識庫或任何 MCP 工具」（寫明後 24 個 job 全部遵守）。'
+      + '那批題目對三者都太簡單，只證明穩定、測不出上限；跨多檔重構、長時間 agentic 作業、上網查證未測。'
+      + '獨立 Grok CLI pipe 後端、用 Grok CLI 自己的登入（不是 direct-api provider），'
+      + 'low/medium/high/xhigh effort 已實測（grok 1.0.50）。',
   },
   {
     situation: '合併零碎小任務',
@@ -167,9 +178,10 @@ export const DISPATCH_GUIDANCE: ReadonlyArray<{
   },
   {
     situation: '稽核／第二意見',
-    model: 'claude-ultra 或 gemini-3.1-pro-high',
+    model: 'claude-ultra、grok-4.7 或 gemini-3.1-pro-high',
     note:
       '要換一家的視角才有意義；同一家的模型會犯同一種錯。結果要逐條驗證，不要照單全收。'
+      + 'grok-4.7 在 2026-10-10 的審查題（4 個真 bug＋3 個誘餌）兩輪零誤報、不確定的會標存疑，但每次要 3–5 分鐘。'
       + '⚠️ gemini-3.1-pro-high 的交付率不穩：2026-09-09 通讀長文件撞過 agy 的 5 分鐘 print timeout，'
       + '2026-10-03 派同一份稽核，430 秒後 stdout 累計只有 177 bytes（就是那一行 agy warning），'
       + '之後 ai-cli MCP 連線中斷、結果再也取不回來。'

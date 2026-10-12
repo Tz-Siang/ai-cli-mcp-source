@@ -782,8 +782,8 @@
   {
     "name": "日常派工 effort 改回 high（偏離維護者的派工政策）",
     "file": "src/models/catalog.ts",
-    "from": "    reasoningEffort: 'medium',",
-    "to": "    reasoningEffort: 'high',",
+    "from": "    model: 'gpt-6.1-sol',\n    reasoningEffort: 'medium',",
+    "to": "    model: 'gpt-6.1-sol',\n    reasoningEffort: 'high',",
     "expect": "日常派工建議與模型政策一致",
     "script": "verify-alias-config.mjs"
   },
@@ -2245,5 +2245,21 @@
     "to": "",
     "expect": "auto-adopt rejects expired identity evidence and refreshes due GC despite throttling",
     "script": "verify-adopt.mjs"
+  },
+  {
+    "name": "codex strict 在 Windows 不再補讀檔提示（模型挑到管線就被 blocked by policy）",
+    "file": "src/agents/codex.ts",
+    "from": "  const stdinPrompt = process.platform === 'win32' ? `${CODEX_WINDOWS_READ_ONLY_HINT}\\n\\n${prompt}` : prompt;",
+    "to": "  const stdinPrompt = prompt;",
+    "expect": "codex strict 在 Windows 的 stdin 前綴讀檔提示",
+    "script": "verify-mcp-capabilities.mjs"
+  },
+  {
+    "name": "dispatchGuidance 的 Grok 定位拿掉知識庫外送 xAI 的警告",
+    "file": "src/models/catalog.ts",
+    "from": "      + '不希望內容外送時，prompt 要寫明「不要使用知識庫或任何 MCP 工具」（寫明後 24 個 job 全部遵守）。'",
+    "to": "      + ''",
+    "expect": "Dispatch guidance: 換一家視角的審查",
+    "script": "verify-job-usage.mjs"
   }
 ]

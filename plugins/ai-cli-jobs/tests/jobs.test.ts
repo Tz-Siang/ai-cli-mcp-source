@@ -1,6 +1,6 @@
 import type { AiCliJobsJob } from '../types/index'
 import { test, expect, mock } from 'claude-code/testing'
-import { taskLabel, runPid, elapsed, eventLabel, inferAgent, POLL_MS, CALL_TIMEOUT_MS } from '../hooks/register'
+import { taskLabel, runPid, elapsed, eventLabel, failureText, inferAgent, POLL_MS, CALL_TIMEOUT_MS, ADOPTED_TASK } from '../hooks/register'
 
 const tree = (text: string) => ({ type: 'Text' as const, props: {}, children: [text] })
 const ref = { plugin: 'ai-cli-jobs', key: 'jobs' } as const
@@ -260,4 +260,79 @@ test('an isError poll result is shown on the running row', async ($, on) => {
   await $.tool.call({ tool: 'mcp__ai-cli__run', tool_use_id: 'err', model: 'haiku', prompt: 'task' })
   await clock.advance(POLL_MS)
   expect(held[0]).toEqual(expect.objectContaining({ status: 'running', lastEvent: '輪詢失敗：server not connected' }))
+})
+
+test('engine refusals and missing servers turn into the fix, shown in full on the row', async ($, on) => {
+  expect(failureText('ai-cli-jobs: $.mcp.call(ai-cli, list_processes) refused: Auto mode classifier unavailable'))
+    .toBe('輪詢被拒：把 mcp__ai-cli__list_processes 加進 permissions.allow（原因：Auto mode classifier unavailable）')
+  expect(failureText('ai-cli-jobs: $.mcp.call(ai-cli, list_processes) refused: Permission denied by a deny rule'))
+    .toContain('（原因：Permission denied by a deny rule）')
+  expect(failureText('ai-cli-jobs: $.mcp.call: no connected MCP tool "list_processes" on a server named "ai-cli"'))
+    .toBe('輪詢失敗：ai-cli MCP 未連線，用 /mcp 重連（server 名稱須為 ai-cli）')
+  expect(failureText('server not connected')).toBe('輪詢失敗：server not connected')
+  let held: AiCliJobsJob[] = []
+  on('state.set', ref, async ($, e, next) => { held = e.value; return next(e) })
+  const clock = mock.clock(on)
+  on('tool.call', { tool: 'mcp__ai-cli__run' }, () => ({ result: { pid: 900 } }))
+  // The harness cannot raise the engine's own refusal: a deny from a test hook comes back as "$.mcp.call: <deny>",
+  // while Claude Code 2.1.296 throws "<plugin>: $.mcp.call(<server>, <tool>) refused: <deny>" (read from the binary).
+  // Feed that exact text through the isError path, which reaches the same failureText as a thrown error.
+  on('mcp.call', () => ({ value: { isError: true, content: [{ type: 'text', text: 'ai-cli-jobs: $.mcp.call(ai-cli, list_processes) refused: Auto mode classifier unavailable' }] } }))
+  await $.tool.call({ tool: 'mcp__ai-cli__run', tool_use_id: 'refused', model: 'haiku', prompt: 'task' })
+  await clock.advance(POLL_MS)
+  expect(held[0]).toEqual(expect.objectContaining({ status: 'running', lastEvent: '輪詢被拒：把 mcp__ai-cli__list_processes 加進 permissions.allow（原因：Auto mode classifier unavailable）' }))
+  const ui = await $.ui.mount({ plugin: 'ai-cli-jobs', surface: 'terminal', component: 'AbovePrompt', props: band })
+  expect((await ui.find({ type: 'Text' }))?.text).toContain('把 mcp__ai-cli__list_processes 加進 permissions.allow（原因：Auto mode classifier unavailable）')
+  await ui.unmount()
+})
+
+test('jobs the server adopted from an ended session show up once, with their model', async ($, on) => {
+  let held: AiCliJobsJob[] = []
+  on('state.set', ref, async ($, e, next) => { held = e.value; return next(e) })
+  const clock = mock.clock(on)
+  let adoptedStatus = 'running'
+  on('tool.call', { tool: 'mcp__ai-cli__run' }, () => ({ result: { pid: 1100 } }))
+  on('mcp.call', () => ({ value: { isError: false, content: [], structuredContent: [
+    { pid: 1100, agent: 'claude', status: 'running', elapsedSec: 1 },
+    { pid: 1200, jobId: 'job-1200', agent: 'codex', model: 'gpt-6.1-sol', status: adoptedStatus, elapsedSec: 300, lastEvent: 'item.completed file_change', adopted: true },
+    { pid: 1300, jobId: 'job-1300', agent: 'claude', status: 'running', elapsedSec: 5, recovered: true },
+  ] } }))
+  await $.tool.call({ tool: 'mcp__ai-cli__run', tool_use_id: 'own', model: 'haiku', prompt: 'own task' })
+  await clock.advance(POLL_MS)
+  expect(held.map(j => j.pid)).toEqual([1100, 1200])
+  expect(held[1]).toEqual(expect.objectContaining({ agent: 'codex', model: 'gpt-6.1-sol', task: ADOPTED_TASK, status: 'running', elapsedSec: 300, lastEvent: 'item.completed file_change' }))
+  const ui = await $.ui.mount({ plugin: 'ai-cli-jobs', surface: 'terminal', component: 'AbovePrompt', props: band })
+  expect((await ui.find({ type: 'Text', text: /接管自前一個 session/ }))?.text).toContain('5:00')
+  await ui.unmount()
+  await clock.advance(POLL_MS)
+  expect(held.filter(j => j.pid === 1200)).toHaveLength(1)
+  adoptedStatus = 'completed'
+  await clock.advance(POLL_MS)
+  expect(held[1]?.status).toBe('completed')
+  // Pruned after retention, and not brought back although the server still lists it.
+  await clock.advance(120_000)
+  expect(held.map(j => j.pid)).toEqual([1100])
+})
+
+test('adopted rows need a jobId, and one already held is never brought back after it is pruned', async ($, on) => {
+  let held: AiCliJobsJob[] = []
+  on('state.set', ref, async ($, e, next) => { held = e.value; return next(e) })
+  const clock = mock.clock(on)
+  let ownStatus = 'running'
+  on('tool.call', { tool: 'mcp__ai-cli__run' }, ($, e) => ({ result: { pid: (e as { tool_use_id: string }).tool_use_id === 'keep' ? 1400 : 1500 } }))
+  on('mcp.call', () => ({ value: { isError: false, content: [], structuredContent: [
+    { pid: 1400, jobId: 'job-1400', agent: 'claude', status: 'running', elapsedSec: 1 },
+    // Dispatched here, then adopted back by this session's new principal (a resumed session keeps its rows).
+    { pid: 1500, jobId: 'job-1500', agent: 'codex', status: ownStatus, elapsedSec: 2, adopted: true },
+    { pid: 1600, agent: 'codex', status: 'running', elapsedSec: 3, adopted: true },
+  ] } }))
+  await $.tool.call({ tool: 'mcp__ai-cli__run', tool_use_id: 'keep', model: 'haiku', prompt: 'keeps polling alive' })
+  await $.tool.call({ tool: 'mcp__ai-cli__run', tool_use_id: 'own', model: 'gpt-6.1-sol', prompt: 'own job' })
+  await clock.advance(POLL_MS)
+  expect(held.map(j => j.pid)).toEqual([1400, 1500])
+  expect(held[1]?.task).toBe('own job')
+  ownStatus = 'completed'
+  await clock.advance(POLL_MS)
+  await clock.advance(120_000)
+  expect(held.map(j => j.pid)).toEqual([1400])
 })

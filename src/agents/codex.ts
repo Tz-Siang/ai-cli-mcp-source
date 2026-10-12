@@ -91,6 +91,19 @@ const CODEX_REASONING = new Set(['low', 'medium', 'high', 'xhigh', 'max', 'ultra
  */
 const CODEX_SAFE_CAPABILITIES = new Set(['fs/read', 'analysis/produce']);
 
+/**
+ * strict 模式在 Windows 上沒有沙箱：`--ignore-user-config` 連 `[windows] sandbox` 也不載，
+ * codex 改用安全指令清單把關，管線（`| Select-Object`）、`cmd /c` 會在執行前被拒（`blocked by policy`）；
+ * 單一的 `Get-Content -Raw`、`rg`、`Get-ChildItem` 則照常通過。模型挑到被拒的寫法就讀不到檔，
+ * 還會 exit 0 交一份「無法完成」的回覆——2026-10-10 一次唯讀審查就是這樣落空的。
+ * 2026-10-12 對照（codex-cli 0.162.1、gpt-6.1-sol low，讀第 50–60 行）：沒提示的那次用
+ * `Get-Content | Select-Object` 被拒後放棄；提示後改用 `rg` 一次成功。
+ * 改帶 `-c windows.sandbox=...` 不可行：同機 unelevated 每個指令 exit -1、elevated 回
+ * `helper_unknown_error: setup refresh had errors`，比安全清單還糟。
+ * 只補在 stdin，不改 `prompt`：任務摘要與 F3 斷言看的是原 prompt。
+ */
+export const CODEX_WINDOWS_READ_ONLY_HINT = `【ai-cli 唯讀模式（Windows）】這次以 codex --sandbox read-only 執行，Windows 上沒有沙箱，指令改由安全清單把關：讀檔請用單一指令，例如 Get-Content -Raw <路徑>、rg -n <模式> <路徑>、Get-ChildItem -Recurse -Name；不要用管線（|）、Select-Object、cmd /c，這些會在執行前被拒絕（blocked by policy）。只需要部分內容時，讀整個檔案或用 rg 篩選。`;
+
 function buildStrictCommand(
   input: BuildCommandInput,
   capabilities: readonly string[]
@@ -121,7 +134,8 @@ function buildStrictCommand(
     '--json',
     '-'
   );
-  return { cliPath, args, cwd, agent: 'codex', prompt, resolvedModel, stdinPrompt: prompt };
+  const stdinPrompt = process.platform === 'win32' ? `${CODEX_WINDOWS_READ_ONLY_HINT}\n\n${prompt}` : prompt;
+  return { cliPath, args, cwd, agent: 'codex', prompt, resolvedModel, stdinPrompt };
 }
 
 /**

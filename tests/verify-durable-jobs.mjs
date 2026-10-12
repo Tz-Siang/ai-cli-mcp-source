@@ -92,7 +92,9 @@ async function dispatch(c, state, spec, model = 'gpt-5.5') {
 }
 async function heap(state) {
   rmSync(join(state, 'heap.json'), { force: true }); writeFileSync(join(state, 'heap-request.json'), '{}');
-  return until(() => existsSync(join(state, 'heap.json')) && JSON.parse(readFileSync(join(state, 'heap.json'))));
+  // 觀測器不是原子寫入：讀到寫一半的 heap.json 要當成還沒好，不能讓 JSON.parse 的例外穿出 until。
+  // 2026-10-12 一次完整 npm test 就因此在 50 個 1 MiB job 的壓力測試誤報 Unexpected end of JSON input。
+  return until(() => { try { return JSON.parse(readFileSync(join(state, 'heap.json'))); } catch { return undefined; } });
 }
 
 try {
@@ -293,7 +295,8 @@ if (!section || section === 'memory') {
       dispatched.push({ pid: job.pid, jobId: job.meta.jobId }); console.log('DISPATCH ' + JSON.stringify(dispatched.at(-1)));
       await until(() => existsSync(join(job.dir, 'exit.json'))); await c.call('list_processes');
       outputBytes += statSync(join(job.dir, 'stdout.log')).size + statSync(join(job.dir, 'stderr.log')).size;
-      const io = await until(() => existsSync(join(state, 'io-' + job.pid + '.json')) && JSON.parse(readFileSync(join(state, 'io-' + job.pid + '.json'))));
+      // 同 heap()：io 檔在 runner 的 exit 事件以一般寫入產生，讀到一半要等下一輪。
+      const io = await until(() => { try { return JSON.parse(readFileSync(join(state, 'io-' + job.pid + '.json'))); } catch { return undefined; } });
       assert.equal(io.writes, 2, 'runner must write only meta and exit, never per-chunk logs'); metadataBytes += io.bytes; metadataWrites += io.writes;
       if ((i + 1) % 10 === 0) { samples.push({ jobs: i + 1, heapUsed: (await heap(state)).heapUsed }); console.log('HEAP ' + JSON.stringify(samples.at(-1))); }
     }

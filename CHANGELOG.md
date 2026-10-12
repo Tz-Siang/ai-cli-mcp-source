@@ -20,6 +20,23 @@
   可接管時間為執行期間全程＋結束後 30 分鐘（另受共用容量上限限制），不重跑、不延長保留期。
   既有 lock 一律拒絕並給手動清理提示，避免兩方回收舊鎖時刪掉另一方新鎖、同時接管成功的競態。
   接管後 list／result 帶 `adopted: true`，list 另帶 model，verbose result 帶 `adoptedFrom`；CLI 不決定接收 session，僅提供候選。（Codex，Claude 設計與派工）
+- `dispatchGuidance` 的 Grok 那列改寫成實測定位：換一家視角的審查、知識萃取與文件查證用 `grok-4.7` medium。
+  依據是 2026-10-10 六項 × 兩輪與 2026-10-12 第二回（真實 repo 跨 9 檔功能、網路查證）評測，grok-4.7 與 gpt-6.1-sol／sonnet
+  客觀判分全部平手，差別只在速度與成本，所以日常 coding 不換；另寫明 Grok 會讀使用者的全域 CLAUDE.md 與 MCP 設定、曾把知識庫條目
+  送進 xAI，不希望外送時 prompt 要寫明不要用知識庫或 MCP。「稽核／第二意見」列一併加入 grok-4.7（兩輪審查題零誤報、每次 3–5 分鐘）。
+  既有突變「日常派工 effort 改回 high」的片段 `reasoningEffort: 'medium'` 因此變成命中兩處，改綁 `model: 'gpt-6.1-sol'` 那一列。（Claude）
+
+### 修正
+
+- codex 的唯讀模式（`capabilities`）在 Windows 讀不到檔：strict 帶 `--ignore-user-config`，連 `[windows] sandbox` 也不載，
+  codex 改用安全指令清單把關，`| Select-Object`、`cmd /c` 會在執行前被拒（`blocked by policy`），模型挑到就讀不到檔、還 exit 0 交一份
+  「無法完成」——2026-10-10 一次唯讀審查就這樣落空。2026-10-12 實測（codex-cli 0.162.1）逐一確認哪些寫法被拒，並做對照：讀第 50–60 行，
+  不提示的那次用管線被拒後放棄，提示後改用 `rg` 一次成功。改帶 `-c windows.sandbox=...` 不可行（unelevated 每個指令 exit -1、
+  elevated 回 `helper_unknown_error`）。修法：Windows 上 strict 在 stdin 開頭補讀檔提示（`CODEX_WINDOWS_READ_ONLY_HINT`），
+  `prompt` 欄位不動；新增 1 筆斷言與 1 筆突變。（Claude）
+- `verify-durable-jobs` 偶發 `Unexpected end of JSON input`：測試觀測器以一般寫入產生 `heap.json`、`io-<pid>.json`，
+  讀端一看到檔案存在就 `JSON.parse`，讀到寫一半就把例外拋出 `until`。改成讀不到完整 JSON 就等下一輪。2026-10-12 一次完整
+  `npm test` 因此在 50 個 1 MiB job 的壓力測試誤報失敗，重跑即過；只動測試端。（Claude）
 
 ### 修正（ai-cli-jobs 面板）
 
@@ -32,6 +49,16 @@
 - 輪詢間隔由 3 秒改為 0.5 秒；`POLL_MS` 改為 export，測試改用常數而不是寫死 3000。（Claude）
 - plugin 版本 0.1.0 → 0.1.1，描述裡的輪詢間隔同步改為 0.5 秒。版本號不變時 `claude plugin update` 會回
   「already at the latest version」，其他機器就收不到上面幾筆修正。（Claude）
+- 輪詢失敗改成可以照做的提示，整句顯示（原本 28 字截斷只剩「輪詢失敗：ai-cli-jobs: $.mcp.call」，看不出是哪一關）：
+  被拒（`$.mcp.call(<server>, <tool>) refused: <原因>`）→「把 mcp__ai-cli__list_processes 加進 permissions.allow」並附原因
+  （deny 規則或 hook 拒絕時加 allow 沒用，原因要留著）；沒連上（`no connected MCP tool`）→ 用 /mcp 重連。兩種格式從
+  Claude Code 2.1.296 執行檔字串核對；測試框架的 deny 產生的是另一種格式，所以測試用 isError 路徑餵入原文。（Claude）
+- 顯示伺服器自動接管來的 job（`adopted: true`，標「接管自前一個 session」、帶 model）：session 開始 5 秒後探查一次，
+  之後閒置時每 60 秒一次（伺服器在 MCP 啟動與每 60 秒 GC 時接管，MCP 可能晚連上、別的 session 也可能晚結束），
+  有 job 執行中時一般輪詢也會帶到。同一個 jobId 只顯示一次；`seen` 不在 session.end 清掉，因為 /clear 只送 end 不再送 start，
+  伺服器仍會列著那些 job。沒有 jobId 的列不接。sonnet 唯讀審查 11 條：成立已修 9 條（seen 登錄時機、/clear、updater 副作用、
+  session.end 競態、只探查兩次、拒絕原因、計時器殘留、pid 當鍵、同測試另一處 JSON 競態）；不修 2 條：已完成的接管 job 顯示
+  120 秒是刻意的（讓人知道前一個 session 的工作結束了），提示太長會換行需實機確認。plugin 版本 0.1.1 → 0.1.2。（Claude）
 
 ### 文件
 

@@ -74,6 +74,15 @@ console.log('MCP run 的唯讀能力（capabilities → strict builder）\n');
     '★ capabilities → strict builder（codex：--sandbox read-only、零危險旗標）',
     built.args.join(' ')
   );
+  // Windows 的 read-only 沒有沙箱、只認安全指令清單；提示只進 stdin，原 prompt 不變。
+  check(
+    built.prompt === 'hi'
+      && (process.platform === 'win32'
+        ? built.stdinPrompt.startsWith('【ai-cli 唯讀模式（Windows）】') && built.stdinPrompt.endsWith('\n\nhi')
+        : built.stdinPrompt === 'hi'),
+    '★ codex strict 在 Windows 的 stdin 前綴讀檔提示（不用管線／cmd /c），其他平台原樣',
+    JSON.stringify({ platform: process.platform, prompt: built.prompt, stdin: built.stdinPrompt?.slice(0, 40) })
+  );
 }
 
 // 4. 空陣列 ≠ 沒給。折成同一件事，等於讓要求限制的呼叫端拿到全開權限而不自知。

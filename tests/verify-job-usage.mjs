@@ -352,6 +352,7 @@ try {
     ['避免重複派工', ['重複派兩個 job', '交叉驗證']],
     ['減少輪詢成本', ['自己 session', 'wait', '90 秒', 'peek', '5~10 秒']],
     ['記錄每個 job 用量', ['agentOutput.usage', 'unknown', 'cost_usd_nominal', '訂閱帳單']],
+    ['換一家視角的審查、知識萃取與文件查證（xAI Grok CLI）', ['gpt-6.1-sol', 'CLAUDE.md', 'xAI', '不要使用知識庫或任何 MCP 工具', '測不出上限']],
   ]) check(`Dispatch guidance: ${situation}`, () => {
     const entry = guidance.find((g) => g.situation === situation);
     assert.ok(entry);
