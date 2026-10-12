@@ -1,6 +1,6 @@
 import type { AiCliJobsJob } from '../types/index'
 import { test, expect, mock } from 'claude-code/testing'
-import { taskLabel, runPid, elapsed, eventLabel, failureText, inferAgent, POLL_MS, CALL_TIMEOUT_MS, ADOPTED_TASK } from '../hooks/register'
+import { taskLabel, runPid, elapsed, eventLabel, failureText, inferAgent, POLL_MS, CALL_TIMEOUT_MS, ADOPTED_TASK, DISCOVER_EARLY_MS } from '../hooks/register'
 
 const tree = (text: string) => ({ type: 'Text' as const, props: {}, children: [text] })
 const ref = { plugin: 'ai-cli-jobs', key: 'jobs' } as const
@@ -312,6 +312,26 @@ test('jobs the server adopted from an ended session show up once, with their mod
   // Pruned after retention, and not brought back although the server still lists it.
   await clock.advance(120_000)
   expect(held.map(j => j.pid)).toEqual([1100])
+})
+
+test('an adoption that lands after the first look shows up within seconds, not a minute later', async ($, on) => {
+  let held: AiCliJobsJob[] = []
+  on('state.set', ref, async ($, e, next) => { held = e.value; return next(e) })
+  const clock = mock.clock(on)
+  let adopted = false
+  on('mcp.call', () => ({ value: { isError: false, content: [], structuredContent: adopted
+    ? [{ pid: 1700, jobId: 'job-1700', agent: 'codex', model: 'gpt-6.1-sol', status: 'running', elapsedSec: 400, adopted: true }]
+    : [] } }))
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/proj', surface: 'terminal', isInteractive: true })
+  await clock.advance(DISCOVER_EARLY_MS[0])
+  expect(held).toEqual([])
+  // On Windows the server finished adopting 7–11 s after the session started; the row is up by 15 s.
+  await clock.advance(11_000 - DISCOVER_EARLY_MS[0])
+  adopted = true
+  await clock.advance(4_000)
+  expect(held.map(j => j.pid)).toEqual([1700])
+  expect(held[0]?.task).toBe(ADOPTED_TASK)
 })
 
 test('adopted rows need a jobId, and one already held is never brought back after it is pruned', async ($, on) => {

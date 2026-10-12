@@ -112,11 +112,12 @@ function applyRow(j: AiCliJobsJob, row: Record<string, unknown>, now: number): A
 }
 export const ADOPTED_TASK = '接管自前一個 session'
 /**
- * The server adopts a same-project job when the MCP starts and on each 60 s GC pass, and the MCP may connect late
- * or another session may end later, so look soon after the session starts and then once a minute while idle;
- * while anything is running the regular poll sees them too.
+ * The server adopts a same-project job once the MCP is ready and on each 60 s GC pass, and the MCP may connect late
+ * or another session may end later. On Windows the adoption landed 7–11 s after claude.exe started (three restarts),
+ * so a single look at 5 s always came too early and the job only showed a minute later: look every 5 s for the first
+ * 30 s, then once a minute while idle; while anything is running the regular poll sees them too.
  */
-export const DISCOVER_FIRST_MS = 5_000
+export const DISCOVER_EARLY_MS = [5_000, 10_000, 15_000, 20_000, 25_000, 30_000]
 export const DISCOVER_EVERY_MS = 60_000
 
   let poll: Timer | undefined
@@ -222,7 +223,7 @@ export const register: Register = on => {
     await prune($)
     for (const t of discovery) t.cancel()
     discovery = epoch !== generation ? [] : [
-      $.clock.after(DISCOVER_FIRST_MS, () => { void refresh($) }),
+      ...DISCOVER_EARLY_MS.map(ms => $.clock.after(ms, () => { void refresh($) })),
       $.clock.every(DISCOVER_EVERY_MS, () => { void refresh($) }),
     ]
     return next(e)

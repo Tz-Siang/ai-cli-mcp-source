@@ -10,6 +10,12 @@
 
 ### 修復
 
+- ai-cli-jobs 面板 0.1.4：新 session 開場後，接管來的 job 要將近一分鐘才出現在面板上。面板只在開場 5 秒時查一次，之後每 60 秒才查一次；
+  但伺服器要等 MCP ready 之後，才在背景查行程身分、完成接管。2026-10-13 在這台 Windows 連開三個 session 實測，
+  從 claude.exe 啟動到 meta.json 寫下 `adoptedAt` 分別是 7、11、7 秒，所以 5 秒那次每次都撲空。
+  使用者因此看到「沒接回來」，開了不到一分鐘的 session 更是從頭到尾都看不到。
+  改成前 30 秒每 5 秒查一次，之後照舊每 60 秒一次。新測試模擬接管在第 11 秒才完成，要求 15 秒內出現；
+  時機改回只查 5 秒那一次時，這條測試會在斷言失敗（Expected [1700]、Received []）。（Claude）
 - ai-cli-jobs 面板 0.1.3：`list_processes` 被 `permissions.deny` 擋下時，面板原本顯示「ai-cli MCP 未連線，用 /mcp 重連」，
   照做沒有用。deny 規則會把工具整個從 session 拿掉，`$.mcp.call` 因此在第一關回 `no connected MCP tool`，和真的沒連上同一種錯誤。
   2026-10-12 在真實終端機（Claude Code 2.1.296，conhost）實測：deny 時面板顯示「未連線」，同設定拿掉 deny 後輪詢成功。
