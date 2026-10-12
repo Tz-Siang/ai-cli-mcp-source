@@ -194,12 +194,31 @@ once per 60-second GC cycle, including when the new session starts before the ol
 one closes. No prompt or tool call is normally needed.
 
 The project directory is the MCP server's cwd, captured at construction and stored
-as `projectDir` on new MCP jobs. Claude Code's stdio MCP cwd was verified to match
-the session's working directory. New jobs must match that directory exactly;
+as `projectDir` on new MCP jobs. That the stdio MCP cwd equals the session's working
+directory was verified only on Claude Code 2.1.296; other versions and MCP clients are
+unverified. If the cwd cannot be read (for example, it was deleted), automatic takeover
+is disabled; manual adoption is unaffected. New jobs must match that directory exactly;
 older jobs without `projectDir` qualify when `workFolder` equals it or is underneath
-it, respecting path boundaries. Windows comparisons ignore case; other platforms
-preserve case. This prevents another project's active session from taking your jobs.
-Set `AI_CLI_AUTO_ADOPT=off` to disable automatic takeover; manual adoption remains available.
+it, respecting path boundaries. When the project directory is a filesystem root or the
+home directory, older jobs qualify only when `workFolder` is exactly that directory
+(otherwise every project below it would match). Windows comparisons ignore case; other
+platforms preserve case. This prevents another project's active session from taking your jobs.
+
+Set `AI_CLI_AUTO_ADOPT` to `off`, `0`, `false` or `no` (trimmed, case-insensitive) to
+disable automatic takeover; manual adoption remains available. Put it in the **MCP
+server's env configuration** (for example Claude Code's MCP config, or
+`[mcp_servers.<name>.env]` in codex `config.toml`): codex forwards only allowlisted
+environment variables to MCP servers, so a shell export may not reach it.
+
+Workers dispatched by ai-cli (claude / codex / grok) also load the ai-cli MCP, often
+with the same project as cwd. **An MCP running under a worker never adopts**: automatic
+takeover is disabled and manual `adopt` is refused; otherwise, once the original session
+closes, the worker would capture the project's orphans, including its own parent job,
+and the user's new session could not get them. Detection has two layers: the
+environment has `AI_CLI_WORKER=1` (not blocking when `AI_CLI_ALLOW_NESTED=1`, matching
+the dispatch guard), or a runner/worker of an unfinished job is among the MCP process's
+ancestors (a fallback for when codex drops the marker). If the ancestor chain cannot
+be confirmed, only automatic takeover is disabled.
 
 | Interface | Action |
 | --- | --- |
@@ -207,16 +226,23 @@ Set `AI_CLI_AUTO_ADOPT=off` to disable automatic takeover; manual adoption remai
 | CLI `ai-cli adopt` | Read-only candidate JSON. PID/jobId arguments are rejected; use the receiving MCP session's tool. CLI `ps` / `result` / `wait` / `kill` already see all jobs. |
 
 Candidates include `projectDir` (`null` for older jobs) and `autoAdopt`, indicating
-whether they are within this MCP's automatic scope (the current cwd for CLI previews).
+whether this MCP would adopt them automatically: within its automatic scope, with the
+switch on, and not running under a worker (CLI previews use the current cwd, the switch
+and the environment marker). Candidate `model` matches list rows (requested model first),
+and `status` comes only from `exit.json` / `lost.json`.
 
 Only durable MCP jobs with `meta.json` and a verified runner identity are eligible.
 The original dispatching session must have ended: an absent PID or a different OS
-creation identity proves this; identity lookup failure refuses adoption. Jobs with
-no principal can also be adopted. Adoption works throughout execution and for
+creation identity proves this; identity lookup failure refuses adoption. When the
+principal is null (principal identification failed at dispatch), the dispatching MCP
+server decides instead: the job is adoptable only once that server is confirmed ended;
+if it is still alive or cannot be confirmed, both automatic and manual adoption are
+refused, and the error says the dispatching MCP server is still present. Jobs with
+neither principal nor server are never adopted automatically; manual adoption is allowed. Adoption works throughout execution and for
 30 minutes after completion, subject to the shared capacity limits below; it never
 restarts execution or extends retention. Adopted jobs immediately appear in this
 session's `list_processes`, `get_result`, `wait`, `peek` and `kill_process`.
-List/result items carry `adopted: true`; list items also include `model`. Verbose results include the complete
+List/result items carry `adopted: true` (not `recovered`, which means the same principal reconnected); list items also include `model`. Verbose results include the complete
 `adoptedFrom` history of original principal/server identities and adoption times.
 
 An existing `adopt.lock` always refuses adoption. Automatic takeover skips it and

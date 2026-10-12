@@ -4,10 +4,10 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { basename, dirname, join, resolve, sep } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
+import { basename, dirname, join, parse, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { JobStore, atomicJson, GC_INTERVAL_MS, inAutoAdoptScope, jobResult, listAdoptCandidates, readJobMetas, RETENTION_MS } from '../dist/core/job-store.js';
+import { JobStore, atomicJson, autoAdoptSwitchOn, GC_INTERVAL_MS, inAutoAdoptScope, jobResult, listAdoptCandidates, readJobMetas, RETENTION_MS } from '../dist/core/job-store.js';
 import { ProcessService } from '../dist/core/process-service.js';
 import { runCli } from '../dist/app/cli.js';
 
@@ -15,7 +15,8 @@ const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const temp = mkdtempSync(join(tmpdir(), 'ai-cli-adopt-'));
 const originalAutoAdopt = process.env.AI_CLI_AUTO_ADOPT;
 delete process.env.AI_CLI_AUTO_ADOPT;
-const ownPrincipal = { pid: process.ppid, started: 'own-principal', name: 'test-principal' };
+// ppid 0：祖先鏈到此確定結束（不在 worker 底下）；缺 ppid 會被判成無法確認而停用自動接管。
+const ownPrincipal = { pid: process.ppid, started: 'own-principal', name: 'test-principal', ppid: 0 };
 const ownServer = { pid: process.pid, started: 'own-server', name: 'test-server' };
 const rows = new Map([[ownPrincipal.pid, ownPrincipal], [ownServer.pid, ownServer]]);
 const alive = new Set();
@@ -65,16 +66,16 @@ async function store(dir, customLookup = lookup, source = 'mcp', principal = own
   return result;
 }
 function caseDir() { const dir = join(temp, randomUUID()); mkdirSync(dir); return dir; }
-async function automaticStore(dir, { projectDir = ROOT, principal = ownPrincipal, server = ownServer, customLookup = lookup, source = 'mcp', readOnly = false } = {}) {
+async function automaticStore(dir, { projectDir = ROOT, useCwd = false, principal = ownPrincipal, server = ownServer, customLookup = lookup, source = 'mcp', readOnly = false } = {}) {
   const identities = async pids => {
     const found = await customLookup(pids.filter(pid => pid !== process.pid && pid !== process.ppid));
     if (pids.includes(process.pid)) found.set(process.pid, server);
-    if (pids.includes(process.ppid)) found.set(process.ppid, principal);
+    if (pids.includes(process.ppid)) found.set(process.ppid, { ppid: 0, ...principal });
     return found;
   };
-  const s = new JobStore(dir, source, readOnly, identities, projectDir); stores.push(s); await s.ready; return s;
+  const s = new JobStore(dir, source, readOnly, identities, useCwd ? undefined : projectDir); stores.push(s); await s.ready; return s;
 }
-async function gcCycle(s) { s.collectedAt = -Infinity; s.checkedAt = -Infinity; await s.check(); s.collect(); await s.collectAll(); }
+async function gcCycle(s) { s.collectedAt = -Infinity; s.checkedAt = -Infinity; await s.check(undefined, true); s.collect(); await s.collectAll(); }
 function processService(s) { const ps = Object.create(ProcessService.prototype); ps.store = s; ps.processManager = new Map(); ps.ready = s.ready; return ps; }
 
 try {
@@ -157,7 +158,7 @@ try {
       const dir = caseDir(), f = fixture(dir), s = await store(dir);
       writeFileSync(f.lock, lockText); const before = snapshot(f.directory);
       await assert.rejects(s.adopt(f.meta.pid), error => {
-        assert(error.message.includes(f.lock)); assert.match(error.message, /請手動刪除此檔後重試/);
+        assert(error.message.includes(f.lock)); assert.match(error.message, /另一個 session 可能正在接管/); assert.match(error.message, /持續存在.*才手動刪除/);
         const parsed = (() => { try { return JSON.parse(lockText); } catch { return null; } })();
         assert(error.message.includes(String(parsed?.principal?.pid ?? 'unknown')));
         assert(error.message.includes(parsed?.createdAt ?? 'unknown')); return true;
@@ -372,11 +373,11 @@ try {
   await test('auto-adopt rejects expired identity evidence and refreshes due GC despite throttling', async () => {
     const dir = caseDir(), old = id('cached-auto-owner', true), f = fixture(dir, { meta: { projectDir: ROOT, principal: old } }), before = contents(f.path);
     const s = await automaticStore(dir);
-    s.identities.set(old.pid, { identity: { ...old, started: 'stale-unrelated-identity' }, checkedAt: Date.now() - GC_INTERVAL_MS });
+    s.autoAdoptSnapshot = { metas: [metaOf(f)], identities: new Map([[old.pid, { ...old, started: 'stale-unrelated-identity' }]]), at: Date.now() - GC_INTERVAL_MS };
     await s.autoAdoptJobs(); assert.equal(s.list().length, 0); assert.equal(contents(f.path), before);
     rows.set(old.pid, { ...old, started: 'reused-after-initial-batch' });
     s.checkedAt = Date.now(); s.collectedAt = -Infinity;
-    await s.check(); await s.collectAll(); assert.equal(s.list()[0]?.jobId, f.meta.jobId);
+    await s.check(undefined, true); await s.collectAll(); assert.equal(s.list()[0]?.jobId, f.meta.jobId);
   });
   await test('auto-adopt excludes jobs created after its identity batch', async () => {
     const dir = caseDir(), old = id('batch-owner', true), f = fixture(dir, { meta: { projectDir: ROOT, principal: old } });
@@ -482,6 +483,131 @@ try {
       assert.equal(listed.find(j => j.jobId === requested.meta.jobId).model, 'fixture-requested');
       assert.equal(listed.find(j => j.jobId === fallback.meta.jobId).model, 'fixture-fallback');
     }
+  });
+  await test('adopt worker environment disables automatic and manual takeover', async () => {
+    const saved = { worker: process.env.AI_CLI_WORKER, nested: process.env.AI_CLI_ALLOW_NESTED };
+    process.env.AI_CLI_WORKER = '1'; delete process.env.AI_CLI_ALLOW_NESTED;
+    try {
+      const dir = caseDir(), f = fixture(dir, { meta: { projectDir: ROOT } }), before = contents(f.path), s = await automaticStore(dir);
+      await gcCycle(s); assert.equal(s.list().length, 0); assert.equal(contents(f.path), before);
+      await assert.rejects(s.adopt(f.meta.pid), /ai-cli worker/); assert.equal(contents(f.path), before); assert(!existsSync(f.lock));
+      assert.deepEqual((await s.adopt()).map(c => c.autoAdopt), [false]);
+      // 與派工判斷同一語意：明示 AI_CLI_ALLOW_NESTED=1 時標記不擋。
+      process.env.AI_CLI_ALLOW_NESTED = '1';
+      await gcCycle(s); assert.equal(s.list()[0]?.jobId, f.meta.jobId);
+    } finally {
+      for (const [key, value] of [['AI_CLI_WORKER', saved.worker], ['AI_CLI_ALLOW_NESTED', saved.nested]]) if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  });
+  await test('adopt worker ancestry disables automatic and manual takeover', async () => {
+    // 模擬 codex 沒轉標記：MCP 的父行程是 worker CLI，再上一層是父 job 的 runner。
+    const dir = caseDir(), runner = { ...id('ancestor-runner', true), ppid: 0 }; rows.set(runner.pid, runner);
+    const parentJob = fixture(dir, { runner, meta: { projectDir: ROOT } }), orphan = fixture(dir, { meta: { projectDir: ROOT } });
+    const before = [parentJob, orphan].map(f => contents(f.path));
+    const s = await automaticStore(dir, { principal: { ...id('worker-cli', true), ppid: runner.pid } });
+    await gcCycle(s); assert.equal(s.list().length, 0); assert.deepEqual([parentJob, orphan].map(f => contents(f.path)), before);
+    for (const f of [parentJob, orphan]) await assert.rejects(s.adopt(f.meta.pid), /ai-cli worker/);
+    assert.deepEqual([parentJob, orphan].map(f => contents(f.path)), before);
+    // 祖先還在卻查不到身分：無法確認 → 不自動接；手動不受影響。
+    const dir2 = caseDir(), hidden = id('hidden-ancestor'); alive.add(hidden.pid);
+    const g = fixture(dir2, { meta: { projectDir: ROOT } }), beforeG = contents(g.path);
+    const u = await automaticStore(dir2, { principal: { ...id('unconfirmed-chain', true), ppid: hidden.pid } });
+    await gcCycle(u); assert.equal(u.list().length, 0); assert.equal(contents(g.path), beforeG);
+    assert.equal((await u.adopt(g.meta.pid)).adopted, true);
+  });
+  await test('adopt null principal defers to the dispatching MCP server', async () => {
+    const dir = caseDir(), a = fixture(dir, { meta: { projectDir: ROOT, principal: null, server: id('null-principal-live-server', true) } }), before = contents(a.path);
+    const s = await automaticStore(dir); await gcCycle(s);
+    assert.equal(s.list().length, 0); assert.equal(contents(a.path), before);
+    await assert.rejects(s.adopt(a.meta.pid), /dispatching MCP server is still alive/); assert.equal(contents(a.path), before);
+    assert.deepEqual(await s.adopt(), []);
+    const dir2 = caseDir(), b = fixture(dir2, { meta: { projectDir: ROOT, principal: null, server: id('null-principal-dead-server') } });
+    const s2 = await automaticStore(dir2); assert.deepEqual(s2.list().map(j => j.jobId), [b.meta.jobId]);
+    const dir3 = caseDir(), c = fixture(dir3, { meta: { projectDir: ROOT, principal: null, server: null } }), beforeC = contents(c.path);
+    const s3 = await automaticStore(dir3); await gcCycle(s3); assert.equal(s3.list().length, 0); assert.equal(contents(c.path), beforeC);
+    assert.equal((await s3.adopt(c.meta.pid)).adopted, true); assert.equal(metaOf(c).adoptedFrom[0].server, null);
+  });
+  await test('auto-adopt legacy scope at a filesystem root or home directory requires an exact workFolder', async () => {
+    const home = homedir(), root = parse(ROOT).root;
+    assert(!inAutoAdoptScope({ workFolder: join(home, 'some-project') }, home)); assert(inAutoAdoptScope({ workFolder: home }, home));
+    assert(!inAutoAdoptScope({ workFolder: ROOT }, root)); assert(inAutoAdoptScope({ workFolder: root }, root));
+    assert(inAutoAdoptScope({ workFolder: join(ROOT, 'src') }, ROOT), 'ordinary project directories keep descendant scope');
+    const dir = caseDir(), f = fixture(dir, { meta: { workFolder: join(home, 'other-project') } }), before = contents(f.path);
+    const s = await automaticStore(dir, { projectDir: home }); assert.equal(s.list().length, 0); assert.equal(contents(f.path), before);
+  });
+  await test('auto-adopt disabled when the MCP cwd is unavailable', async () => {
+    const dir = caseDir(), f = fixture(dir, { meta: { projectDir: ROOT } }), before = contents(f.path), realCwd = process.cwd;
+    const broken = () => { throw Object.assign(new Error('ENOENT: no such file or directory, uv_cwd'), { code: 'ENOENT' }); };
+    let pending;
+    process.cwd = broken;
+    try { pending = Promise.all([automaticStore(dir, { useCwd: true }), listAdoptCandidates(dir, lookup, ownPrincipal)]); }
+    finally { process.cwd = realCwd; }
+    const [s, candidates] = await pending; assert.equal(s.projectDir, null);
+    assert.deepEqual(candidates.map(c => c.autoAdopt), [false]);
+    await gcCycle(s); assert.equal(s.list().length, 0); assert.equal(contents(f.path), before);
+    assert.equal((await s.adopt(f.meta.pid)).adopted, true);
+  });
+  await test('auto-adopt switch accepts trimmed case-insensitive off values', async () => {
+    const previous = process.env.AI_CLI_AUTO_ADOPT;
+    try {
+      for (const value of [' OFF ', 'Off', '0', 'false', 'FALSE', ' no ']) { process.env.AI_CLI_AUTO_ADOPT = value; assert.equal(autoAdoptSwitchOn(), false, JSON.stringify(value)); }
+      for (const value of ['on', '1', '', 'offline']) { process.env.AI_CLI_AUTO_ADOPT = value; assert.equal(autoAdoptSwitchOn(), true, JSON.stringify(value)); }
+      process.env.AI_CLI_AUTO_ADOPT = ' Off ';
+      const dir = caseDir(), f = fixture(dir, { meta: { projectDir: ROOT } }), before = contents(f.path), s = await automaticStore(dir);
+      await gcCycle(s); assert.equal(s.list().length, 0); assert.equal(contents(f.path), before);
+    } finally { if (previous === undefined) delete process.env.AI_CLI_AUTO_ADOPT; else process.env.AI_CLI_AUTO_ADOPT = previous; }
+  });
+  await test('adopt keeps a committed transfer when lock removal fails', async () => {
+    const dir = caseDir(), f = fixture(dir), s = await store(dir), logs = [], originalError = console.error;
+    // 持有 lock 期間把它換成非空目錄，rmSync 必丟例外（模擬 EPERM／EBUSY）。
+    s.adoptLockHeld = () => { rmSync(f.lock); mkdirSync(f.lock); writeFileSync(join(f.lock, 'busy'), ''); };
+    console.error = (...args) => logs.push(args.map(String).join(' '));
+    try { assert.equal((await s.adopt(f.meta.pid)).adopted, true); }
+    finally { console.error = originalError; }
+    assert.deepEqual(metaOf(f).principal, ownPrincipal); assert.equal(s.list()[0].adopted, true);
+    assert(logs.some(line => line.includes(f.lock)), 'lock removal failure must be logged with its path');
+    assert(existsSync(f.lock)); rmSync(f.lock, { recursive: true, force: true });
+  });
+  await test('adopt lock refuses a second session inside the critical section', async () => {
+    const dir = caseDir(), f = fixture(dir), a = await store(dir);
+    const b = await store(dir, lookup, 'mcp', id('lock-session-b', true), id('lock-server-b', true));
+    let refused;
+    // A 持有 lock 時，B 已完成非同步查證、直接進入同步提交。
+    a.adoptLockHeld = () => { try { b.commitAdoption(f.directory, metaOf(f), false); } catch (error) { refused = error; } };
+    assert.equal((await a.adopt(f.meta.pid)).adopted, true);
+    assert(refused, 'B must be refused while A holds the lock'); assert.equal(refused.reason, 'locked'); assert.match(refused.message, /Adoption lock exists/);
+    assert.deepEqual(metaOf(f).principal, ownPrincipal); assert.equal(metaOf(f).adoptedFrom.length, 1); assert(!existsSync(f.lock));
+  });
+  await test('auto-adopt due GC does not bypass throttling for wait and peek checks', async () => {
+    const dir = caseDir(), queries = []; fixture(dir, { meta: { projectDir: ROOT, principal: ownPrincipal, server: ownServer } });
+    const s = await automaticStore(dir, { customLookup: async pids => { if (pids.length) queries.push([...pids]); return lookup(pids); } });
+    s.checkedAt = Date.now(); s.collectedAt = -Infinity; queries.length = 0;
+    await s.check(); assert.equal(queries.length, 0, 'unforced checks stay throttled while GC is due');
+    await s.check(undefined, true); assert.equal(queries.length, 1);
+  });
+  await test('auto-adopt reads its GC identity snapshot instead of the shared cache', async () => {
+    const dir = caseDir(), old = id('snapshot-owner', true), f = fixture(dir, { meta: { projectDir: ROOT, principal: old } }), before = contents(f.path);
+    const s = await automaticStore(dir); assert.equal(s.list().length, 0);
+    s.collectedAt = -Infinity; s.checkedAt = -Infinity; await s.check(undefined, true);
+    // 晚到的舊查詢改寫共用快取，不得影響這一輪已查到的「原 principal 仍活著」。
+    s.identities.set(old.pid, { identity: { ...old, started: 'late-stale-query' }, checkedAt: Date.now() });
+    await s.collectAll(); assert.equal(s.list().length, 0); assert.equal(contents(f.path), before);
+  });
+  await test('adopt candidates batch identity lookups and skip directories deleted while listing', async () => {
+    const dir = caseDir(), keep = fixture(dir), gone = fixture(dir, { exitCode: 0 }), calls = [];
+    const candidates = await listAdoptCandidates(dir, async pids => { calls.push([...pids]); rmSync(gone.directory, { recursive: true, force: true }); return lookup(pids); }, ownPrincipal, ROOT);
+    assert.deepEqual(candidates.map(c => c.jobId), [keep.meta.jobId]); assert.equal(calls.length, 1);
+    assert.equal(candidates[0].status, 'running');
+  });
+  await test('adopt candidate and list fields stay consistent', async () => {
+    const dir = caseDir(), f = fixture(dir, { meta: { projectDir: ROOT, model: 'fixture-requested', resolvedModel: 'fixture-resolved' } }), s = await store(dir);
+    assert.equal((await s.adopt())[0].model, 'fixture-requested');
+    const previous = process.env.AI_CLI_AUTO_ADOPT; process.env.AI_CLI_AUTO_ADOPT = 'off';
+    try { assert.equal((await s.adopt())[0].autoAdopt, false); }
+    finally { if (previous === undefined) delete process.env.AI_CLI_AUTO_ADOPT; else process.env.AI_CLI_AUTO_ADOPT = previous; }
+    await s.adopt(f.meta.pid);
+    assert.equal(s.list()[0].adopted, true); assert.equal(s.list()[0].recovered, undefined, 'adopted jobs are not same-principal recoveries');
+    assert.equal(jobResult(s.get(f.meta.pid)).recovered, undefined);
   });
 } finally {
   for (const s of stores) s.dispose();

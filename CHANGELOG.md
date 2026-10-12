@@ -20,6 +20,10 @@
   可接管時間為執行期間全程＋結束後 30 分鐘（另受共用容量上限限制），不重跑、不延長保留期。
   既有 lock 一律拒絕並給手動清理提示，避免兩方回收舊鎖時刪掉另一方新鎖、同時接管成功的競態。
   接管後 list／result 帶 `adopted: true`，list 另帶 model，verbose result 帶 `adoptedFrom`；CLI 不決定接收 session，僅提供候選。（Codex，Claude 設計與派工）
+  稽核後修正：worker 底下的 MCP（`AI_CLI_WORKER` 標記或祖先鏈上有 job 的 runner／worker）不再自動或手動接管；
+  principal 為 null 時改看派工的 server，兩者皆 null 只能手動；專案目錄是根目錄或家目錄時舊 job 不套前綴；
+  cwd 取不到不再讓 MCP 起不來；開關接受 off／0／false／no；刪 lock 失敗不蓋掉接管結果；存活查詢不再抓命令列；
+  GC 到期只有計時器繞過節流；自動接管只讀該輪查詢快照；候選清單批次查詢、不讀 log；補真的撞上 lock 的測試。（Claude）
 - `dispatchGuidance` 的 Grok 那列改寫成實測定位：換一家視角的審查、知識萃取與文件查證用 `grok-4.7` medium。
   依據是 2026-10-10 六項 × 兩輪與 2026-10-12 第二回（真實 repo 跨 9 檔功能、網路查證）評測，grok-4.7 與 gpt-6.1-sol／sonnet
   客觀判分全部平手，差別只在速度與成本，所以日常 coding 不換；另寫明 Grok 會讀使用者的全域 CLAUDE.md 與 MCP 設定、曾把知識庫條目

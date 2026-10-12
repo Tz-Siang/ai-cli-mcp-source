@@ -2,6 +2,7 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
+import { homedir } from 'node:os';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join, parse, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,7 +10,7 @@ import { StringDecoder } from 'node:string_decoder';
 import type { AgentId, BuiltCommand } from '../agents/types.js';
 import { getAgent } from '../agents/registry.js';
 import { grokResultFailed, collectGrokPromptFiles } from '../agents/grok.js';
-import { buildWorkerEnv } from './worker-env.js';
+import { buildWorkerEnv, isNestedWorker } from './worker-env.js';
 import { jobStateDir, lookupIdentities, lookupPrincipalIdentities, taskSummary, shortText, type ProcessIdentity, type IdentityLookup, type LiveJob } from './live-jobs.js';
 import { buildLiveness, emptyOutputStats, listProcessTiming, elapsedSeconds, type ProcessOutputStats } from './liveness.js';
 import { LivenessEventExtractor } from './peek-extractor.js';
@@ -62,9 +63,8 @@ export function readJobMetas(dir: string): JobMeta[] {
     return meta ? [meta] : [];
   });
 }
-/** 無主或已確認死亡才可接管；查詢失敗與缺少建立時間都維持 unknown。 */
-async function principalState(principal: ProcessIdentity | null, lookup: IdentityLookup): Promise<'dead' | 'alive' | 'unknown'> {
-  if (principal === null) return 'dead';
+/** 已確認死亡才算 dead；查詢失敗與缺少建立時間都維持 unknown。 */
+async function principalState(principal: ProcessIdentity | null | undefined, lookup: IdentityLookup): Promise<'dead' | 'alive' | 'unknown'> {
   if (!principal || !Number.isInteger(principal.pid) || principal.pid <= 0) return 'unknown';
   if (!mayBeAlive(principal.pid)) return 'dead';
   try {
@@ -73,6 +73,28 @@ async function principalState(principal: ProcessIdentity | null, lookup: Identit
     return current.started === principal.started ? 'alive' : 'dead';
   } catch { return 'unknown'; }
 }
+type OwnerState = 'dead' | 'alive' | 'unknown' | 'server-alive' | 'server-unknown' | 'ownerless';
+/**
+ * principal 為 null（identify 失敗仍派工）時改看派工的 server：server 還在就不是孤兒。
+ * 兩者皆 null 為無主，只能手動接管。
+ */
+async function ownerState(meta: Pick<JobMeta, 'principal' | 'server'>, lookup: IdentityLookup): Promise<OwnerState> {
+  if (meta.principal !== null) return principalState(meta.principal, lookup);
+  if (meta.server === null) return 'ownerless';
+  const server = await principalState(meta.server, lookup);
+  return server === 'dead' ? 'dead' : server === 'alive' ? 'server-alive' : 'server-unknown';
+}
+/** 只讀一份已完成的查詢結果，不再碰 OS 或共用快取。 */
+function fromSnapshot(ids: Map<number, ProcessIdentity>): IdentityLookup {
+  return async pids => new Map(pids.flatMap(pid => ids.has(pid) ? [[pid, ids.get(pid)!] as const] : []));
+}
+/** cwd 已被刪除時 process.cwd() 會丟 ENOENT；取不到就沒有專案目錄，自動接管停用。 */
+export function currentProjectDir(): string | null { try { return process.cwd(); } catch { return null; } }
+/** AI_CLI_AUTO_ADOPT 去空白、不分大小寫；off／0／false／no 都關閉。 */
+export function autoAdoptSwitchOn(env: NodeJS.ProcessEnv = process.env): boolean {
+  return !/^(?:off|0|false|no)$/.test((env.AI_CLI_AUTO_ADOPT ?? '').trim().toLowerCase());
+}
+const WORKER_ADOPT_ERROR = 'Cannot adopt: this MCP server runs under an ai-cli worker (AI_CLI_WORKER=1, or a job runner/worker is among its ancestors). 此 MCP 是 worker 底下的 server，不接管 job，否則會把自己的父 job 接走；請由使用者的 session 接管。';
 /** 接管時 null 只等於 null；其餘必須有相同的 PID 與 OS 建立時間。 */
 function unchangedOwner(a: ProcessIdentity | null, b: ProcessIdentity | null): boolean {
   return a === null || b === null ? a === b : !!a && !!b && a.pid === b.pid && a.started === b.started;
@@ -82,12 +104,14 @@ function normalizeProjectDir(directory: string): string {
   return full === parse(full).root ? full : full.replace(process.platform === 'win32' ? /[\\/]+$/ : /\/+$/, '');
 }
 /** 新 job 精準比對 session 專案；舊 job 以 workFolder 的路徑邊界判定，不能搶走相似前綴的專案。 */
-export function inAutoAdoptScope(meta: Pick<JobMeta, 'projectDir' | 'workFolder'>, projectDir: string): boolean {
+export function inAutoAdoptScope(meta: Pick<JobMeta, 'projectDir' | 'workFolder'>, projectDir: string | null): boolean {
   const directory = meta.projectDir === undefined ? meta.workFolder : meta.projectDir;
-  if (typeof directory !== 'string') return false;
+  if (typeof directory !== 'string' || projectDir === null) return false;
   const normalize = (value: string) => { const full = normalizeProjectDir(value); return process.platform === 'win32' ? full.toLowerCase() : full; };
   const folder = normalize(directory), root = normalize(projectDir);
   if (meta.projectDir !== undefined) return folder === root;
+  // 在磁碟根目錄或家目錄開 session 時，底下每個專案的舊 job 都落在前綴內；只接完全相同的 workFolder。
+  if (root === normalize(parse(root).root) || root === normalize(homedir())) return folder === root;
   return folder === root || folder.startsWith(root.endsWith(sep) ? root : root + sep);
 }
 class AdoptionError extends Error {
@@ -98,24 +122,42 @@ export interface AdoptCandidate {
   startTime: string; endTime?: string; workFolder: string; task: string;
   principal: Pick<ProcessIdentity, 'pid' | 'name'> | null; autoAdopt: boolean; projectDir: string | null;
 }
-/** CLI 與 MCP 共用的唯讀候選查詢，不建立 store、不落 lost.json 或延長保留期。 */
-export async function listAdoptCandidates(dir = jobStateDir(), lookup: IdentityLookup = lookupPrincipalIdentities, principal: ProcessIdentity | null = null, projectDir = process.cwd()): Promise<AdoptCandidate[]> {
-  const candidates: AdoptCandidate[] = [];
-  for (const listed of readJobMetas(dir)) {
-    const directory = join(dir, 'jobs', listed.jobId), meta = readJobMeta(directory, listed.jobId, false);
-    if (!meta || !meta.runner.started || meta.source !== 'mcp' || sameIdentity(meta.principal, principal)) continue;
-    if (await principalState(meta.principal, lookup) !== 'dead') continue;
-    const job = record(meta, directory); refreshJob(job);
-    if (job.status === 'running') {
-      let ids = new Map<number, ProcessIdentity>();
-      try { ids = await lookup([meta.runner.pid, ...(meta.worker ? [meta.worker.pid] : [])].filter(mayBeAlive)); } catch { /* 存活不明仍維持 running。 */ }
+/**
+ * CLI 與 MCP 共用的唯讀候選查詢，不建立 store、不落 lost.json 或延長保留期。
+ * status 只看 exit.json／lost.json，不讀輸出 log；歸屬與 runner／worker 存活併成一次批次查詢。
+ * `autoAdopt` 旗標同時反映開關與 worker 判定，不只是專案範圍。
+ */
+export async function listAdoptCandidates(dir = jobStateDir(), lookup: IdentityLookup = lookupIdentities, principal: ProcessIdentity | null = null,
+  projectDir: string | null = currentProjectDir(), autoAdopt = autoAdoptSwitchOn() && !isNestedWorker()): Promise<AdoptCandidate[]> {
+  const listed = readJobMetas(dir).flatMap(({ jobId }) => {
+    const directory = join(dir, 'jobs', jobId), meta = readJobMeta(directory, jobId, false);
+    if (!meta || !meta.runner.started || meta.source !== 'mcp' || sameIdentity(meta.principal, principal)) return [];
+    const exit = readJobExit(directory), lost = exit ? undefined : lostTime(directory);
+    return [{ meta, directory, exit, lost }];
+  });
+  const pids = listed.flatMap(({ meta, exit, lost }) => {
+    const owner = meta.principal ?? meta.server;
+    return [...(owner ? [owner.pid] : []), ...(exit || lost ? [] : [meta.runner.pid, ...(meta.worker ? [meta.worker.pid] : [])])];
+  }).filter(mayBeAlive);
+  // 查詢失敗時歸屬維持 unknown（不列入），running 維持 running。
+  let ids = new Map<number, ProcessIdentity>();
+  try { ids = await lookup(pids); } catch { /* 存活不明。 */ }
+  const batch = fromSnapshot(ids), candidates: AdoptCandidate[] = [];
+  for (const { meta, directory, exit, lost } of listed) {
+    const state = await ownerState(meta, batch);
+    if (state !== 'dead' && state !== 'ownerless') continue;
+    let status: StoredJob['status'] = exit ? (exit.exitCode === 0 && !exit.killed && !exit.timedOut ? 'completed' : 'failed') : lost ? 'lost' : 'running';
+    let endTime = exit?.endTime ?? lost;
+    if (status === 'running') {
       const gone = (id: ProcessIdentity | null) => !id || (ids.has(id.pid) ? !sameIdentity(id, ids.get(id.pid)) : !mayBeAlive(id.pid));
-      if (gone(meta.runner) && gone(meta.worker)) { job.status = 'lost'; job.endTime = lostTime(directory) ?? new Date().toISOString(); }
+      if (gone(meta.runner) && gone(meta.worker)) { status = 'lost'; endTime = new Date().toISOString(); }
     }
-    candidates.push({ pid: meta.pid, jobId: meta.jobId, agent: meta.agent, model: meta.resolvedModel || meta.model || null,
-      status: job.status, startTime: meta.startTime, ...(job.endTime ? { endTime: job.endTime } : {}), workFolder: meta.workFolder,
+    // GC 可能在讀取途中把目錄改名刪除；跳過該筆，不讓整個清單失敗。
+    if (!existsSync(directory)) continue;
+    candidates.push({ pid: meta.pid, jobId: meta.jobId, agent: meta.agent, model: meta.model ?? meta.resolvedModel ?? null,
+      status, startTime: meta.startTime, ...(endTime ? { endTime } : {}), workFolder: meta.workFolder,
       task: taskSummary(meta.task), principal: meta.principal ? { pid: meta.principal.pid, name: meta.principal.name } : null,
-      autoAdopt: inAutoAdoptScope(meta, projectDir), projectDir: meta.projectDir ?? null });
+      autoAdopt: autoAdopt && inAutoAdoptScope(meta, projectDir), projectDir: meta.projectDir ?? null });
   }
   return candidates;
 }
@@ -330,12 +372,18 @@ export class JobStore {
   private identities = new Map<number, { identity: ProcessIdentity; checkedAt: number }>();
   private owned = new Set<string>();
   private reportedAdoptLocks = new Set<string>();
-  private autoAdoptBatch: JobMeta[] = [];
-  readonly projectDir: string;
-  constructor(readonly dir = jobStateDir(), private source: 'mcp' | 'cli' = 'cli', private readOnly = false, private lookup: IdentityLookup = lookupIdentities, projectDir = process.cwd()) {
-    this.projectDir = normalizeProjectDir(projectDir);
+  /** GC 那一輪的候選與它自己的查詢結果；自動接管只讀這份，不讀會被晚到查詢改寫的共用快取。 */
+  private autoAdoptSnapshot?: { metas: JobMeta[]; identities: Map<number, ProcessIdentity>; at: number };
+  /** 祖先鏈判定只快取確定的結果；無法確認時下次需要再查。 */
+  private ancestry?: 'worker' | 'none';
+  /** 僅供測試：持有 adopt.lock 的同步臨界區內呼叫，預設不啟用。 */
+  private adoptLockHeld?: () => void;
+  readonly projectDir: string | null;
+  constructor(readonly dir = jobStateDir(), private source: 'mcp' | 'cli' = 'cli', private readOnly = false, private lookup: IdentityLookup = lookupIdentities, projectDir: string | null = currentProjectDir()) {
+    this.projectDir = projectDir === null ? null : normalizeProjectDir(projectDir);
     this.ready = this.initialize();
-    if (!readOnly) { this.timer = setInterval(() => { void this.check().then(async () => {
+    // 只有 GC 計時器到期那一路繞過 2 秒節流。
+    if (!readOnly) { this.timer = setInterval(() => { void this.check(this.lookup, Date.now() - this.collectedAt >= GC_INTERVAL_MS).then(async () => {
       if (Date.now() - this.collectedAt >= GC_INTERVAL_MS) { this.collect(); await this.collectAll(); }
     }).catch(e => console.error('ai-cli jobs:', e)); }, 2000); this.timer.unref(); }
   }
@@ -351,7 +399,41 @@ export class JobStore {
     }).catch(e => console.error('ai-cli jobs GC:', e)).finally(() => { this.collecting = undefined; this.collectedAt = Date.now(); });
     return this.collecting;
   }
-  private autoAdoptEnabled(): boolean { return this.source === 'mcp' && !this.readOnly && process.env.AI_CLI_AUTO_ADOPT !== 'off'; }
+  /** 開關、cwd 與環境標記；祖先鏈判定較貴，只在真的有候選時才查。 */
+  private autoAdoptAllowed(): boolean { return autoAdoptSwitchOn() && this.projectDir !== null && !isNestedWorker(); }
+  private autoAdoptEnabled(): boolean { return this.source === 'mcp' && !this.readOnly && this.autoAdoptAllowed(); }
+  /**
+   * worker 底下的 MCP（cwd 常是同一個專案）不得接管，否則原 session 一關，它就把孤兒連同自己的父 job 接走。
+   * codex 只把白名單 env 轉給 MCP，標記可能漏掉，所以再看祖先鏈上有沒有尚未結束的 job 的 runner／worker。
+   * 查詢失敗、祖先還在卻查不到、或祖先是尚未落身分的 runner，都是無法確認。
+   */
+  private async workerAncestry(): Promise<'worker' | 'none' | 'unknown'> {
+    if (this.ancestry) return this.ancestry;
+    const targets: ProcessIdentity[] = [], pending = new Set<number>();
+    for (const meta of readJobMetas(this.dir)) {
+      if (readJobExit(join(this.dir, 'jobs', meta.jobId))) continue;
+      if (!meta.runner.started) { if (mayBeAlive(meta.runner.pid)) pending.add(meta.runner.pid); continue; }
+      targets.push(meta.runner, ...(meta.worker ? [meta.worker] : []));
+    }
+    // worker 啟動 MCP 前，runner 早已落 bootstrap；沒有未結束的 job 就不可能在 worker 底下。
+    if (!targets.length && !pending.size) return this.ancestry = 'none';
+    try {
+      const seen = new Set<number>();
+      for (let pid = process.ppid, depth = 0; depth < 16; depth++) {
+        if (pid <= 0 || seen.has(pid)) return this.ancestry = 'none';
+        seen.add(pid);
+        if (pending.has(pid)) return 'unknown';
+        const parent = (await this.lookup([pid])).get(pid);
+        if (!parent) return mayBeAlive(pid) ? 'unknown' : this.ancestry = 'none';
+        if (!parent.started || parent.ppid === undefined) return 'unknown';
+        if (targets.some(target => sameIdentity(target, parent))) return this.ancestry = 'worker';
+        pid = parent.ppid;
+      }
+    } catch { /* 無法確認。 */ }
+    return 'unknown';
+  }
+  /** 候選的 autoAdopt 旗標與實際自動接管用同一組條件。 */
+  private async autoAdoptActive(): Promise<boolean> { return this.autoAdoptAllowed() && await this.workerAncestry() === 'none'; }
   private autoAdoptMetas(): JobMeta[] {
     return readJobMetas(this.dir).flatMap(listed => {
       const meta = readJobMeta(join(this.dir, 'jobs', listed.jobId), listed.jobId, false);
@@ -360,12 +442,14 @@ export class JobStore {
     });
   }
   private async autoAdoptJobs(): Promise<void> {
-    if (!this.autoAdoptEnabled() || !this.principal || !this.server) return;
-    // check 已將原 principal 併入 GC 查詢；缺席的查詢結果維持 unknown，不另開 OS 查詢。
-    const lookup: IdentityLookup = async pids => new Map(pids.flatMap(pid => {
-      const cached = this.identities.get(pid); return cached && Date.now() - cached.checkedAt < GC_INTERVAL_MS ? [[pid, cached.identity] as const] : [];
-    }));
-    for (const meta of this.autoAdoptBatch) {
+    const snapshot = this.autoAdoptSnapshot; this.autoAdoptSnapshot = undefined;
+    if (!snapshot?.metas.length || !this.autoAdoptEnabled() || !this.principal || !this.server) return;
+    if (Date.now() - snapshot.at >= GC_INTERVAL_MS) return;
+    // 祖先鏈查不到也不接（fail closed）；確定結果會快取，不會每輪重查。
+    if (await this.workerAncestry() !== 'none') return;
+    // check 已將原 principal／server 併入 GC 查詢；缺席的查詢結果維持 unknown，不另開 OS 查詢。
+    const lookup = fromSnapshot(snapshot.identities);
+    for (const meta of snapshot.metas) {
       try { await this.adoptJob(meta.jobId, lookup, true, meta); }
       catch (error) {
         if (error instanceof AdoptionError) {
@@ -401,7 +485,8 @@ export class JobStore {
     for (const meta of readJobMetas(this.dir)) {
       if (this.source === 'mcp' && (meta.source !== 'mcp' || !sameIdentity(meta.principal, this.principal))) continue;
       if (this.jobs.has(meta.jobId)) continue;
-      this.jobs.set(meta.jobId, record(meta, join(this.dir, 'jobs', meta.jobId), this.source === 'mcp'));
+      // recovered 是同一 principal 重啟後接回；這個 server 剛接管進來的不算。
+      this.jobs.set(meta.jobId, record(meta, join(this.dir, 'jobs', meta.jobId), this.source === 'mcp' && !this.owned.has(meta.jobId)));
     }
   }
   async adopt(pid?: number, jobId?: string): Promise<AdoptCandidate[] | { pid: number; jobId: string; adopted?: true; alreadyOwned?: true }> {
@@ -409,8 +494,7 @@ export class JobStore {
     await this.ready;
     if (!this.principal) throw new Error('Cannot adopt: this MCP principal identity is unknown.');
     if (!this.server) throw new Error('Cannot adopt: this MCP server identity is unknown.');
-    const lookup = this.lookup === lookupIdentities ? lookupPrincipalIdentities : this.lookup;
-    if (pid === undefined && jobId === undefined) return listAdoptCandidates(this.dir, lookup, this.principal, this.projectDir);
+    if (pid === undefined && jobId === undefined) return listAdoptCandidates(this.dir, this.lookup, this.principal, this.projectDir, await this.autoAdoptActive());
     if (pid !== undefined && (!Number.isInteger(pid) || pid <= 0)) throw new Error('pid must be a positive integer.');
     if (jobId !== undefined && (typeof jobId !== 'string' || !/^[0-9a-f-]{36}$/.test(jobId))) throw new Error('jobId must be a durable job UUID.');
     const metas = readJobMetas(this.dir);
@@ -421,10 +505,16 @@ export class JobStore {
     const selected = jobId === undefined ? latest : metas.find(meta => meta.jobId === jobId);
     if (!selected) throw new Error(`Job ${jobId ?? pid} not found.`);
     if (pid !== undefined && (selected.pid !== pid || latest?.jobId !== selected.jobId)) throw new Error('pid and jobId must resolve to the same latest job.');
-    return this.adoptJob(selected.jobId, lookup);
+    if (await this.workerState() === 'worker') throw new AdoptionError(WORKER_ADOPT_ERROR, 'ineligible');
+    return this.adoptJob(selected.jobId, this.lookup);
+  }
+  /** 手動接管只拒絕確定是 worker 的；祖先鏈無法確認時仍可由人手動接。 */
+  private async workerState(): Promise<'worker' | 'none' | 'unknown'> {
+    if (isNestedWorker()) return 'worker';
+    return this.workerAncestry();
   }
   private async adoptJob(jobId: string, lookup: IdentityLookup, automatic = false, expectedOwner?: JobMeta): Promise<{ pid: number; jobId: string; adopted?: true; alreadyOwned?: true }> {
-    const directory = resolve(this.dir, 'jobs', jobId), path = join(directory, 'meta.json');
+    const directory = resolve(this.dir, 'jobs', jobId);
     const verified = readJobMeta(directory, jobId, false);
     if (!verified || !verified.runner.started) throw new AdoptionError('Cannot adopt: meta.json with a verified runner identity is required; bootstrap-only jobs are not ready.', 'ineligible');
     if (verified.source !== 'mcp') throw new AdoptionError('Only MCP jobs can be adopted.', 'ineligible');
@@ -432,35 +522,47 @@ export class JobStore {
     if (expectedOwner && (!unchangedOwner(verified.principal, expectedOwner.principal) || !unchangedOwner(verified.server, expectedOwner.server))) throw new AdoptionError('Job ownership changed after the GC identity batch.', 'changed');
     if (automatic && !inAutoAdoptScope(verified, this.projectDir)) throw new AdoptionError('Job is outside this MCP project.', 'ineligible');
     if (sameIdentity(verified.principal, this.principal)) return { pid: verified.pid, jobId: verified.jobId, alreadyOwned: true };
-    const state = await principalState(verified.principal, lookup);
+    const state = await ownerState(verified, lookup);
     if (state === 'alive') throw new AdoptionError('Cannot adopt: the original dispatching session is still alive.', 'ineligible');
-    if (state !== 'dead') throw new AdoptionError('無法確認原派工者已結束 (cannot confirm the original dispatching session has ended).', 'ineligible');
+    if (state === 'server-alive') throw new AdoptionError('Cannot adopt: principal is null and the dispatching MCP server is still alive. 派工的 MCP server 仍在，這個 job 不是孤兒。', 'ineligible');
+    if (state === 'server-unknown') throw new AdoptionError('Cannot adopt: principal is null and the dispatching MCP server cannot be confirmed as ended. 無法確認派工的 MCP server 已結束，視為仍在。', 'ineligible');
+    if (state === 'unknown') throw new AdoptionError('無法確認原派工者已結束 (cannot confirm the original dispatching session has ended).', 'ineligible');
+    if (state === 'ownerless' && automatic) throw new AdoptionError('Job has neither principal nor server; only manual adoption can take it.', 'ineligible');
+    return this.commitAdoption(directory, verified, automatic);
+  }
+  /**
+   * 同步臨界區：拿 lock、重讀比對、原子寫入。不可 await：A/B 都讀到舊 lock 時，B 的回收會刪掉 A 剛取得的新 lock，兩方都能寫入。
+   * 殘留 lock 一律由人工確認後清理；所有非同步身分查詢都已在呼叫前完成。
+   */
+  private commitAdoption(directory: string, verified: JobMeta, automatic: boolean): { pid: number; jobId: string; adopted: true } {
     const lockPath = join(directory, 'adopt.lock');
     let fd: number;
     try { fd = openSync(lockPath, 'wx', 0o600); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
       const lock = json<{ principal?: ProcessIdentity; createdAt?: string }>(lockPath);
-      throw new AdoptionError(`Adoption lock exists: ${lockPath}; holder PID: ${lock?.principal?.pid ?? 'unknown'}; created at: ${lock?.createdAt ?? 'unknown'}. 若確定沒有其他 session 正在接管這個 job（例如接管中的 MCP 當掉），請手動刪除此檔後重試。`, 'locked');
+      throw new AdoptionError(`Adoption lock exists: ${lockPath}; holder PID: ${lock?.principal?.pid ?? 'unknown'}; created at: ${lock?.createdAt ?? 'unknown'}. 另一個 session 可能正在接管這個 job；若這個檔持續存在（例如接管中的 MCP 當掉），才手動刪除此檔後重試。`, 'locked');
     }
-    // 臨界區不可 await：A/B 都讀到舊 lock 時，B 的回收會刪掉 A 剛取得的新 lock，兩方都能寫入。
-    // 殘留 lock 一律由人工確認後清理；所有非同步身分查詢都已完成，再同步重讀與比對歸屬。
     try {
       try { writeFileSync(fd, JSON.stringify({ principal: this.principal, server: this.server, createdAt: new Date().toISOString() }) + '\n'); }
       finally { closeSync(fd); }
+      this.adoptLockHeld?.();
       const current = readJobMeta(directory, verified.jobId, false);
       if (!current || !current.runner.started || current.source !== 'mcp' || !unchangedOwner(current.principal, verified.principal) || !unchangedOwner(current.server, verified.server) || automatic && !inAutoAdoptScope(current, this.projectDir)) {
         throw new AdoptionError('這個 job 在驗證期間已被其他 session 接管或變更，請重新呼叫 adopt。', 'changed');
       }
       const meta: JobMeta = { ...current, principal: this.principal, server: this.server,
         adoptedFrom: [...(current.adoptedFrom ?? []), { principal: current.principal, server: current.server, adoptedAt: new Date().toISOString() }] };
-      atomicJson(path, meta);
+      atomicJson(join(directory, 'meta.json'), meta);
       this.owned.add(meta.jobId);
       const existing = this.jobs.get(meta.jobId);
       if (existing) { existing.meta = meta; existing.adopted = true; }
       this.scan();
       return { pid: meta.pid, jobId: meta.jobId, adopted: true };
-    } finally { rmSync(lockPath, { force: true }); }
+    } finally {
+      // 刪不掉（防毒、delete-pending）不可蓋掉已寫入的接管結果；殘鎖照常留給人工確認。
+      try { rmSync(lockPath, { force: true }); } catch (error) { console.error(`ai-cli jobs: cannot remove adoption lock ${lockPath}:`, error); }
+    }
   }
   start(cmd: BuiltCommand, model?: string, timeoutMs?: number): StoredJob {
     const jobId = randomUUID(), directory = join(this.dir, 'jobs', jobId);
@@ -478,7 +580,8 @@ export class JobStore {
     if (typeof cmd.stdinPrompt === 'string') writeFileSync(join(directory, 'stdin.tmp'), cmd.stdinPrompt, { mode: 0o600 });
     const metaBase: RunnerSpec['meta'] = { version: 1, jobId, agent: cmd.agent, model, resolvedModel: cmd.resolvedModel, effort: cmd.reasoningEffort,
       task: taskSummary(cmd.prompt), workFolder: cmd.cwd, sessionId: cmd.sessionId, startTime: new Date().toISOString(), source: this.source,
-      ...(this.source === 'mcp' ? { projectDir: this.projectDir } : {}),
+      // cwd 取不到時不寫，該 job 依舊 meta 規則以 workFolder 判定範圍。
+      ...(this.source === 'mcp' && this.projectDir !== null ? { projectDir: this.projectDir } : {}),
       server: this.server, principal: this.principal, recoverable: true };
     const spec: RunnerSpec = { command: cmd.cliPath, args: cmd.args, cwd: cmd.cwd, stdin: typeof cmd.stdinPrompt === 'string',
       needsShell: process.platform === 'win32' && !getAgent(cmd.agent).win32DirectExec, timeoutMs, meta: metaBase, serverPid: process.pid, principalPid: this.principal?.pid ?? process.ppid };
@@ -497,9 +600,10 @@ export class JobStore {
     return job;
   }
   refresh(): void { for (const job of this.jobs.values()) { try { refreshJob(job); } catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') this.jobs.delete(job.meta.jobId); else throw e; } } }
-  async check(lookup = this.lookup): Promise<void> {
+  /** force 只給 GC 計時器；wait／peek 每 50ms 的 check 一律受 2 秒節流。 */
+  async check(lookup = this.lookup, force = false): Promise<void> {
     if (this.checking) return this.checking;
-    if (lookup === this.lookup && Date.now() - this.checkedAt < 2000 && (this.readOnly || Date.now() - this.collectedAt < GC_INTERVAL_MS)) return;
+    if (!force && lookup === this.lookup && Date.now() - this.checkedAt < 2000) return;
     this.checking = (async () => {
       if (this.source === 'mcp' && (!this.server || !this.principal)) { await this.identify(); this.scan(); }
       this.refresh();
@@ -513,17 +617,18 @@ export class JobStore {
       }
       const expected = candidates.flatMap(meta => [meta.runner, ...(meta.worker ? [meta.worker] : [])]);
       const autoDue = gcDue && this.autoAdoptEnabled();
-      if (gcDue) this.autoAdoptBatch = autoDue ? this.autoAdoptMetas() : [];
-      if (autoDue) expected.push(...this.autoAdoptBatch.flatMap(meta => meta.principal ? [meta.principal] : []));
+      const batch = autoDue ? this.autoAdoptMetas() : [];
+      // principal 為 null 時改查派工的 server；存活判斷只需建立時間，不抓命令列。
+      if (autoDue) expected.push(...batch.flatMap(meta => { const owner = meta.principal ?? meta.server; return owner ? [owner] : []; }));
       // 同一 PID 的新 job 若帶不同 token，不能套用舊 job 的身分快取。
       for (const id of expected) if (id.started && this.identities.get(id.pid)?.identity.started !== id.started) this.identities.delete(id.pid);
-      const pids = expected.map(id => id.pid);
-      const batchLookup = autoDue && this.lookup === lookupIdentities ? lookupPrincipalIdentities : this.lookup;
-      const ids = await (lookup === this.lookup ? this.cachedLookup(pids, batchLookup) : lookup(pids)).catch(error => {
+      const pids = expected.map(id => id.pid), queriedAt = Date.now();
+      const ids = await (lookup === this.lookup ? this.cachedLookup(pids) : lookup(pids)).catch(error => {
         if (!autoDue) throw error;
         // 合併查詢失敗時不接管；活著但無身分的 principal 仍為 unknown。
         return new Map<number, ProcessIdentity>();
       });
+      if (gcDue) this.autoAdoptSnapshot = { metas: batch, identities: ids, at: queriedAt };
       for (const job of running) {
         refreshJob(job); if (job.status !== 'running') continue;
         if (!job.meta.runner.started) {

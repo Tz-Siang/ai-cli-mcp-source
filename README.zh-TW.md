@@ -616,24 +616,39 @@ CLI `run` 最多等 15 秒握手；逾時仍以 exit 0 回 PID＋jobId 和 warni
 新 server 在 ready 前接管一次，之後每 60 秒的 GC 週期再檢查，涵蓋先開新 session、後關舊 session 的情況。
 
 專案目錄取 MCP server 建構時的 cwd，新 MCP job 會寫入 `projectDir`；
-已實測 Claude Code 的 stdio MCP cwd 就是 session 的工作目錄。
+「stdio MCP cwd＝session 工作目錄」只在 Claude Code 2.1.296 實測過，其他版本或其他 MCP 用戶端未驗證。
+cwd 取不到（例如目錄已被刪除）時停用自動接管，手動不受影響。
 新 job 必須與本專案目錄相同；舊 job 沒有 `projectDir` 時，`workFolder` 等於本專案或位於其下才算，
-並檢查路徑邊界，避免相似前綴誤判。Windows 不分大小寫，其他平台區分大小寫。
-範圍限制避免其他專案的活躍 session 先搶走 job；設定 `AI_CLI_AUTO_ADOPT=off` 可停用自動接管，手動仍可用。
+並檢查路徑邊界，避免相似前綴誤判。專案目錄是磁碟根目錄或家目錄時，舊 job 只接 `workFolder` 完全相同的，
+不套前綴（否則底下所有專案的舊 job 都會被接走）。Windows 不分大小寫，其他平台區分大小寫。
+範圍限制避免其他專案的活躍 session 先搶走 job。
+
+`AI_CLI_AUTO_ADOPT` 設為 `off`／`0`／`false`／`no`（去空白、不分大小寫）可停用自動接管，手動仍可用。
+它要寫在 **MCP server 的 env 設定**裡（例如 Claude Code 的 MCP 設定或 codex `config.toml` 的
+`[mcp_servers.<名稱>.env]`）；codex 只把白名單環境變數轉給 MCP server，在 shell 裡 export 不一定傳得到。
+
+ai-cli 派出的 worker（claude／codex／grok）也會載入 ai-cli MCP，cwd 常是同一個專案。
+**worker 底下的 MCP 不接管**：自動接管停用、手動 `adopt` 也拒絕，否則原 session 一關，worker 會把同專案的孤兒
+連同自己的父 job 接走，使用者新開的 session 反而接不到。判定有兩層：環境有 `AI_CLI_WORKER=1`
+（設了 `AI_CLI_ALLOW_NESTED=1` 時這層不擋，與派工限制同一語意），或 MCP 行程的祖先鏈上有尚未結束的 job 的
+runner／worker（codex 可能漏轉標記時的備援）。祖先鏈查不到時視為無法確認，只停用自動接管。
 
 | 介面 | 用法 |
 | --- | --- |
 | MCP `adopt` | 跨專案的手動備援。不給 `pid`／`jobId` 時列出候選；給其中一個或兩者時接管。PID 只選最新那筆，兩個參數必須指向同一筆。 |
 | CLI `ai-cli adopt` | 唯讀候選 JSON。帶 PID／jobId 會拒絕，必須由接手的 MCP session 呼叫工具；CLI `ps`／`result`／`wait`／`kill` 本來就看得到所有 job。 |
 
-候選帶 `projectDir`（舊 job 為 `null`）與 `autoAdopt`，表示是否在本 MCP 的自動範圍內；CLI 以目前 cwd 預覽範圍。
+候選帶 `projectDir`（舊 job 為 `null`）與 `autoAdopt`，表示本 MCP 會不會自動接它：在自動範圍內、開關未關、且不是 worker 底下的 MCP；
+CLI 以目前 cwd、開關與環境標記預覽。候選的 `model` 與 list 相同（優先請求的模型），`status` 只依 `exit.json`／`lost.json` 判定。
 
 只有已寫入 `meta.json` 且 runner 身分已確認的持久化 MCP job 才可接管。
 原派工 session 必須已結束：PID 不存在或 OS 建立時間不同才算確認；身分查詢失敗會拒絕。
-principal 為 null 的無主 job 也可接管。可接管時間為執行期間全程與結束後 30 分鐘，
+principal 為 null（派工時辨識 principal 失敗）時改看派工的 MCP server：server 已確認結束才可接；
+server 仍在或無法確認則自動、手動都拒絕（錯誤會說明是派工的 MCP server 仍在）。
+principal 與 server 都是 null 的 job 不自動接管，只能手動接。可接管時間為執行期間全程與結束後 30 分鐘，
 另受下方共用容量上限約束；接管不重跑、不延長保留期。接管後立刻出現在該 session 的
 `list_processes`／`get_result`／`wait`／`peek`／`kill_process`。
-list／result 項目帶 `adopted: true`，list 另帶 `model`；verbose result 另有完整 `adoptedFrom`，
+list／result 項目帶 `adopted: true`（不帶 `recovered`，那是同一 principal 重啟後接回），list 另帶 `model`；verbose result 另有完整 `adoptedFrom`，
 依序保留原 principal／server 身分與接管時間。
 
 已存在 `adopt.lock` 時一律拒絕；自動接管會跳過，同一 job 在同一 server 行程只記一次 log，其他 session 已接走則靜默跳過。
