@@ -83,10 +83,11 @@ export function eventLabel(text: string): string {
  * instead of the raw text, which the 28-column event label used to cut down to "ai-cli-jobs: $.mcp.call".
  */
 export function failureText(why: string): string {
-  // auto mode's background refusal is the usual cause, but a deny rule or a hook refuses the same way, so keep its reason.
+  // auto mode's background refusal is the usual cause, but a hook or a declined ask refuses the same way, so keep its reason.
   const refused = why.match(/\$\.mcp\.call\([^)]*\) refused:?\s*(.*)$/s)
   if (refused) return `輪詢被拒：把 mcp__ai-cli__list_processes 加進 permissions.allow（原因：${clip(refused[1], 40) || '未提供'}）`
-  if (/no connected MCP tool\b/.test(why)) return '輪詢失敗：ai-cli MCP 未連線，用 /mcp 重連（server 名稱須為 ai-cli）'
+  // A permissions.deny rule drops the tool from the session, so it lands here, not as a refusal (Claude Code 2.1.296).
+  if (/no connected MCP tool\b/.test(why)) return '輪詢失敗：找不到 mcp__ai-cli__list_processes：ai-cli 未連線（用 /mcp 重連，server 名稱須為 ai-cli），或被 permissions.deny 擋下'
   return `輪詢失敗：${clip(why, 80) || '未知錯誤'}`
 }
 /** Poll failures are our own bounded text and must be read in full; vendor events keep the short label. */

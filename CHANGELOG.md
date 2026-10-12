@@ -8,6 +8,14 @@
 
 ## [Unreleased]
 
+### 修復
+
+- ai-cli-jobs 面板 0.1.3：`list_processes` 被 `permissions.deny` 擋下時，面板原本顯示「ai-cli MCP 未連線，用 /mcp 重連」，
+  照做沒有用。deny 規則會把工具整個從 session 拿掉，`$.mcp.call` 因此在第一關回 `no connected MCP tool`，和真的沒連上同一種錯誤。
+  2026-10-12 在真實終端機（Claude Code 2.1.296，conhost）實測：deny 時面板顯示「未連線」，同設定拿掉 deny 後輪詢成功。
+  提示改為「找不到 mcp__ai-cli__list_processes：ai-cli 未連線（用 /mcp 重連，server 名稱須為 ai-cli），或被 permissions.deny 擋下」。
+  同一次實測也確認長提示在 60–160 欄都會在空白處換行、整句可見，不會截斷或蓋到輸入框。版本號跟著升，`claude plugin update` 才收得到。（Claude）
+
 ## [6.9.0] - 2026-10-12
 
 > 同專案自動接管：原派工 session 結束後，同一個專案新開的 session 會自動接手還在跑（或結束 30 分鐘內）的 job，不必下指令；

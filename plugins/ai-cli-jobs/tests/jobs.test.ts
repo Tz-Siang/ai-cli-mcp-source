@@ -268,7 +268,7 @@ test('engine refusals and missing servers turn into the fix, shown in full on th
   expect(failureText('ai-cli-jobs: $.mcp.call(ai-cli, list_processes) refused: Permission denied by a deny rule'))
     .toContain('（原因：Permission denied by a deny rule）')
   expect(failureText('ai-cli-jobs: $.mcp.call: no connected MCP tool "list_processes" on a server named "ai-cli"'))
-    .toBe('輪詢失敗：ai-cli MCP 未連線，用 /mcp 重連（server 名稱須為 ai-cli）')
+    .toBe('輪詢失敗：找不到 mcp__ai-cli__list_processes：ai-cli 未連線（用 /mcp 重連，server 名稱須為 ai-cli），或被 permissions.deny 擋下')
   expect(failureText('server not connected')).toBe('輪詢失敗：server not connected')
   let held: AiCliJobsJob[] = []
   on('state.set', ref, async ($, e, next) => { held = e.value; return next(e) })
