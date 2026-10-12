@@ -175,7 +175,7 @@ src/
 │   ├─ usage.ts           # 查額度外掛橋接（路徑由環境變數設定）
 │   └─ usage-service.ts   # query_usage 工具的實作與快取
 ├─ app/
-│   ├─ mcp.ts             # MCP server（11 個工具）
+│   ├─ mcp.ts             # MCP server（12 個工具）
 │   └─ cli.ts             # ai-cli 指令列
 └─ bin/
     ├─ ai-cli-mcp.ts      # MCP server 入口
@@ -567,6 +567,7 @@ ai-cli jobs --watch          # 每兩秒更新，Ctrl+C 結束
 ai-cli jobs --json           # JSON 陣列，含 metadata 與時間
 ai-cli jobs --running        # 只看 running，可搭配 watch/json
 ai-cli jobs --watch --json   # 每次更新印一行 JSON 陣列（NDJSON）
+ai-cli adopt                 # 唯讀 JSON 候選清單，供 MCP session 接管
 ```
 
 表格列出狀態（轉圈／✓／✗；lost 為 ?）、agent、解析後的 model 與 effort、
@@ -608,6 +609,37 @@ verbose result 按需讀取，每個 stream 最多 8 MiB；超出時附
 `ai-cli run / ps / result / wait / jobs` 都用同一份 store，持久化 job 不再重複寫監看快照。
 CLI `run` 最多等 15 秒握手；逾時仍以 exit 0 回 PID＋jobId 和 warning，應追蹤這筆 job，勿重派。
 `jobs` 全程唯讀，`AI_CLI_WORKER=1` 下也能執行。
+
+### 自動接管無主 job
+
+原派工 session 結束後，MCP session 會自動接管同專案的合格 job，通常不必再下 prompt 或呼叫工具。
+新 server 在 ready 前接管一次，之後每 60 秒的 GC 週期再檢查，涵蓋先開新 session、後關舊 session 的情況。
+
+專案目錄取 MCP server 建構時的 cwd，新 MCP job 會寫入 `projectDir`；
+已實測 Claude Code 的 stdio MCP cwd 就是 session 的工作目錄。
+新 job 必須與本專案目錄相同；舊 job 沒有 `projectDir` 時，`workFolder` 等於本專案或位於其下才算，
+並檢查路徑邊界，避免相似前綴誤判。Windows 不分大小寫，其他平台區分大小寫。
+範圍限制避免其他專案的活躍 session 先搶走 job；設定 `AI_CLI_AUTO_ADOPT=off` 可停用自動接管，手動仍可用。
+
+| 介面 | 用法 |
+| --- | --- |
+| MCP `adopt` | 跨專案的手動備援。不給 `pid`／`jobId` 時列出候選；給其中一個或兩者時接管。PID 只選最新那筆，兩個參數必須指向同一筆。 |
+| CLI `ai-cli adopt` | 唯讀候選 JSON。帶 PID／jobId 會拒絕，必須由接手的 MCP session 呼叫工具；CLI `ps`／`result`／`wait`／`kill` 本來就看得到所有 job。 |
+
+候選帶 `projectDir`（舊 job 為 `null`）與 `autoAdopt`，表示是否在本 MCP 的自動範圍內；CLI 以目前 cwd 預覽範圍。
+
+只有已寫入 `meta.json` 且 runner 身分已確認的持久化 MCP job 才可接管。
+原派工 session 必須已結束：PID 不存在或 OS 建立時間不同才算確認；身分查詢失敗會拒絕。
+principal 為 null 的無主 job 也可接管。可接管時間為執行期間全程與結束後 30 分鐘，
+另受下方共用容量上限約束；接管不重跑、不延長保留期。接管後立刻出現在該 session 的
+`list_processes`／`get_result`／`wait`／`peek`／`kill_process`。
+list／result 項目帶 `adopted: true`，list 另帶 `model`；verbose result 另有完整 `adoptedFrom`，
+依序保留原 principal／server 身分與接管時間。
+
+已存在 `adopt.lock` 時一律拒絕；自動接管會跳過，同一 job 在同一 server 行程只記一次 log，其他 session 已接走則靜默跳過。
+手動呼叫的錯誤列出完整路徑、持有者 PID 與建立時間（讀不到則為 `unknown`）。
+只有確定沒有其他 session 正在接管該 job（例如接管中的 MCP 當掉），才手動刪除此檔後重試。
+不自動回收殘留鎖：兩方同時清舊鎖時，可能刪掉另一方剛取得的新鎖，導致兩方都接管成功。
 
 結束／lost 的 job 保留 30 分鐘；寫端啟動時及 unref timer 每 60 秒回收，超過 100 個
 已結束 job 或共 500 MiB 時由最舊開始刪除，活著的 job 不刪。
@@ -785,7 +817,7 @@ claude mcp add ai-cli -s user -- node "$PWD\dist\server.js"
 - usage 外掛路徑由寫死改為 `AI_CLI_USAGE_PLUGIN_BIN` 環境變數。
 - ConPTY 與各 agent 行為以 registry 重構。3.0.0 當時對外 MCP 行為與舊 dist 等價，
   **但之後已經分歧**：4.0.0 移除了 OpenCode agent 與 `oc-*` model routing（改用 direct-api），
-  並新增 `set_config` 與 `query_usage` 兩個工具（目前共 11 個）。詳見 `CHANGELOG.md`。
+  並新增 `set_config` 與 `query_usage` 兩個工具（加上 `adopt`，目前共 12 個）。詳見 `CHANGELOG.md`。
 
 ## 與上游原專案的關係
 

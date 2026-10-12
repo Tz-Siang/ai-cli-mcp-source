@@ -52,8 +52,8 @@ async function main(): Promise<number> {
   if (process.argv[2] === 'update') return runUpdateCli(process.argv.slice(3));
   const { runCli } = await import('../app/cli.js');
   // MCP 在 transport 連線後自行處理，不能把 git 放到 handshake 前面。
-  // jobs 是唯讀監看，連「已更新」notice 都不在這個入口清掉。
-  if (process.argv[2] !== 'mcp' && process.argv[2] !== 'jobs') {
+  // jobs／adopt 是唯讀查詢，連「已更新」notice 都不在這兩個入口清掉。
+  if (process.argv[2] !== 'mcp' && process.argv[2] !== 'jobs' && process.argv[2] !== 'adopt') {
     const state = await clearNoticeOnStartup();
     if (state.reason?.startsWith('ai-cli 已是最新版')) process.stderr.write(`${state.reason}\n`);
   }

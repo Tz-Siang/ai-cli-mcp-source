@@ -43,7 +43,7 @@ const ENTRIES = [
 ];
 
 const EXPECTED_TOOLS = [
-  'run', 'list_processes', 'get_result', 'wait', 'peek', 'kill_process',
+  'run', 'adopt', 'list_processes', 'get_result', 'wait', 'peek', 'kill_process',
   'cleanup_processes', 'doctor', 'models', 'set_config', 'query_usage',
 ];
 
@@ -86,6 +86,17 @@ async function checkEntry(entry) {
   const elapsed = performance.now() - listStarted;
   check(elapsed < 1000, `${entry.name} 冷啟動 tools/list < 1 秒`, `${elapsed.toFixed(1)} ms`);
   const names = tools.tools.map((t) => t.name);
+  const adoptTool = tools.tools.find(t => t.name === 'adopt');
+  check(adoptTool?.inputSchema?.properties?.pid?.type === 'number'
+    && adoptTool?.inputSchema?.properties?.jobId?.type === 'string'
+    && !adoptTool?.inputSchema?.required?.length,
+    `${entry.name} adopt schema accepts optional pid and jobId`);
+  check(/automatically adopted/.test(adoptTool?.description ?? '')
+    && /cross-project/.test(adoptTool?.description ?? '')
+    && /original dispatching session has ended/.test(adoptTool?.description ?? '')
+    && /list eligible candidates/.test(adoptTool?.description ?? '')
+    && /30 minutes/.test(adoptTool?.description ?? ''),
+    `${entry.name} adopt description explains ownership, candidates and retention`);
   /*
     工具描述才是呼叫端**最先讀到**的東西。issue #12 的情境是「AI 查不到 fable → 判定不支援」，
     而一個只讀 run schema、從不呼叫 models 的呼叫端（很常見，因為 run 的描述已經把清單給它了）

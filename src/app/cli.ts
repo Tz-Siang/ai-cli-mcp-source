@@ -1,6 +1,6 @@
 /**
  * `ai-cli` 指令列介面。對應 dist/app/cli.js。
- * 子指令：run, wait, peek, ps, jobs, result, kill, cleanup, doctor, models, mcp, update, usage, help。
+ * 子指令：run, adopt, wait, peek, ps, jobs, result, kill, cleanup, doctor, models, mcp, update, usage, help。
  *
  * usage 改為透過環境變數 AI_CLI_USAGE_PLUGIN_BIN 設定外部 plugin（見 plugins/usage.ts）。
  */
@@ -16,11 +16,13 @@ import { runUsagePlugin } from '../plugins/usage.js';
 import { runUpdateCli } from '../core/updater.js';
 import { assertCanStartJob } from '../core/worker-env.js';
 import { runJobs } from './jobs.js';
+import { listAdoptCandidates } from '../core/job-store.js';
 
 export const CLI_HELP_TEXT = `Usage: ai-cli <command> [options]
 
 Commands:
   run       Start an AI CLI process in the background
+  adopt     List orphaned MCP job candidates as JSON (adoption requires MCP)
   wait      Wait for pids; timeout returns JSON + liveness (exit 3)
   peek      Observe new agent events for a short window
   ps        List tracked processes with elapsed time and running liveness
@@ -120,6 +122,18 @@ Options:
   --help, -h                   Show this help message
 `;
 
+export const ADOPT_HELP_TEXT = `Usage: ai-cli adopt
+
+List orphaned MCP job candidates as JSON without changing job files.
+Only jobs whose original dispatching session has ended are eligible, throughout
+execution and for 30 minutes after completion (subject to store capacity limits).
+To adopt a job, call the adopt tool from the receiving MCP session with pid/jobId.
+CLI ps/result/wait/kill already see all jobs; CLI cannot choose a receiving session.
+
+Options:
+  --help, -h                   Show this help message
+`;
+
 export const EXEC_HELP_TEXT = `Usage: ai-cli exec
 
 Run an agent in the FOREGROUND, streaming raw vendor stdout as NDJSON frames.
@@ -183,6 +197,7 @@ export interface CliDeps {
   startMcpServer: () => Promise<void>;
   runProcess: (options: FileStartOptions) => Promise<unknown>;
   listProcesses: () => Promise<unknown>;
+  listAdoptCandidates: () => Promise<unknown>;
   getProcessResult: (pid: number, verbose: boolean) => Promise<unknown>;
   waitForProcesses: (pids: number[], timeoutSeconds: number | undefined, verbose: boolean) => Promise<unknown>;
   peekProcesses: (pids: number[], peekTimeSec: number, includeToolCalls: boolean) => Promise<unknown>;
@@ -205,6 +220,7 @@ const defaultDeps: CliDeps = {
   startMcpServer: () => runMcpServer(),
   runProcess: (options) => getFileProcessService().startProcess(options),
   listProcesses: () => getFileProcessService().listProcesses(),
+  listAdoptCandidates: () => listAdoptCandidates(),
   getProcessResult: (pid, verbose) => getFileProcessService().getProcessResult(pid, verbose),
   waitForProcesses: (pids, timeoutSeconds, verbose) =>
     getFileProcessService().waitForProcesses(pids, timeoutSeconds, verbose),
@@ -281,6 +297,7 @@ export async function runCli(argv: string[], deps: Partial<CliDeps> = {}): Promi
     startMcpServer,
     runProcess,
     listProcesses,
+    listAdoptCandidates: candidates,
     getProcessResult,
     waitForProcesses,
     peekProcesses,
@@ -311,6 +328,16 @@ export async function runCli(argv: string[], deps: Partial<CliDeps> = {}): Promi
 
   if (command === 'update') return runUpdateCli(argv.slice(1), { stdout });
   if (command === 'jobs') return runJobs(argv.slice(1), { stdout, stderr });
+  if (command === 'adopt') {
+    const { positionals, flags } = parseArgs(argv.slice(1));
+    if (hasHelpFlag(flags)) { stdout(ADOPT_HELP_TEXT); return 0; }
+    if (positionals.length || Object.keys(flags).some(key => key !== 'json')) {
+      stderr('Adoption must be requested using the adopt tool from the receiving MCP session. CLI ps/result/wait/kill already see all jobs; CLI cannot choose a receiving session.\n');
+      return 1;
+    }
+    writeJson(stdout, await candidates());
+    return 0;
+  }
 
   if (command === 'usage') {
     const { flags } = parseArgs(argv.slice(1));

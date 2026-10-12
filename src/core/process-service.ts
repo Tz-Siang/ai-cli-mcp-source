@@ -98,6 +98,7 @@ interface ProcessEntry extends ProcessOutputStats {
   stderr: string;
   status: 'running' | 'completed' | 'failed' | 'lost';
   recovered?: true;
+  adopted?: true;
   directory?: string;
   exitCode?: number;
 }
@@ -363,14 +364,23 @@ export class ProcessService {
     for (const [key, entry] of this.processManager) if (entry.directory && !this.store.jobs.has(String(key))) this.processManager.delete(key);
   }
 
+  async adopt(pid?: number, jobId?: string) {
+    const result = await this.store.adopt(pid, jobId);
+    for (const [id, job] of this.store.jobs) this.processManager.set(id, job as unknown as ProcessEntry);
+    return result;
+  }
+
   listProcesses() {
     this.store.refresh(); this.collectExpired(); this.pruneStored();
+    for (const [id, job] of this.store.jobs) this.processManager.set(id, job as unknown as ProcessEntry);
     return [...this.processManager.values()].map((proc) => ({
       pid: proc.pid,
       ...(proc.directory ? { jobId: (proc as unknown as StoredJob).meta.jobId } : {}),
       agent: proc.toolType,
+      model: proc.model ?? proc.resolvedModel,
       status: proc.status,
       ...(proc.recovered ? { recovered: true } : {}),
+      ...(proc.adopted ? { adopted: true } : {}),
       ...listProcessTiming(proc.startTime, proc.endTime,
         proc.status === 'running' ? buildLiveness(proc, proc.startTime, !proc.closed) : undefined),
     }));

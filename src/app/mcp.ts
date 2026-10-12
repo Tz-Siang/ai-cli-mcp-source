@@ -1,6 +1,6 @@
 /**
  * MCP server。對應 dist/app/mcp.js。
- * 工具（11 個）：run, list_processes, get_result, wait, peek, kill_process,
+ * 工具（12 個）：run, adopt, list_processes, get_result, wait, peek, kill_process,
  *       cleanup_processes, doctor, models, set_config, query_usage。
  */
 
@@ -172,6 +172,18 @@ ${getSupportedModelsDescription()}
           },
         },
         {
+          name: 'adopt',
+          description:
+            'Jobs in the same project directory are automatically adopted after the original dispatching session has ended; this tool is usually unnecessary. Use it manually for cross-project takeover. Jobs remain eligible throughout execution and for 30 minutes after completion, subject to store capacity limits. Omit pid and jobId to list eligible candidates with autoAdopt scope flags; a PID selects its latest job, and both selectors must agree.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              pid: { type: 'number', description: 'Optional process ID; resolves to its latest durable job.' },
+              jobId: { type: 'string', description: 'Optional durable job UUID from the candidate list.' },
+            },
+          },
+        },
+        {
           name: 'list_processes',
           description:
             'List tracked AI agent processes with PID, agent and status. Running items include liveness (alive, elapsedSec, sinceLastOutputSec, stdoutBytes, stderrBytes, lastEvent, eventCount, hint), plus elapsedSec, sinceLastOutputSec and lastEvent at the item level. Terminal items include elapsedSec when the end time is known and have no liveness.',
@@ -337,10 +349,18 @@ Note: antigravity (agy) does accept model selection — the resolved name is nor
       debugLog('[Debug] Handling CallToolRequest:', args);
       const toolName = args.params.name;
       const toolArguments = (args.params.arguments || {}) as Record<string, unknown>;
-      if (['run', 'list_processes', 'get_result', 'wait', 'peek', 'kill_process', 'cleanup_processes'].includes(toolName)) await this.processService.ready;
+      if (['run', 'adopt', 'list_processes', 'get_result', 'wait', 'peek', 'kill_process', 'cleanup_processes'].includes(toolName)) await this.processService.ready;
       switch (toolName) {
         case 'run':
           return this.handleRun(toolArguments);
+        case 'adopt':
+          if (toolArguments.pid !== undefined && (typeof toolArguments.pid !== 'number' || !Number.isInteger(toolArguments.pid) || toolArguments.pid <= 0)) {
+            throw new McpError(ErrorCode.InvalidParams, 'pid must be a positive integer.');
+          }
+          if (toolArguments.jobId !== undefined && (typeof toolArguments.jobId !== 'string' || !/^[0-9a-f-]{36}$/.test(toolArguments.jobId))) {
+            throw new McpError(ErrorCode.InvalidParams, 'jobId must be a durable job UUID.');
+          }
+          return this.jsonResult(await this.processService.adopt(toolArguments.pid as number | undefined, toolArguments.jobId as string | undefined));
         case 'list_processes':
           return this.jsonResult(this.processService.listProcesses());
         case 'get_result':

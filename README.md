@@ -150,6 +150,7 @@ ai-cli jobs --watch          # Refresh every 2 seconds; Ctrl+C exits
 ai-cli jobs --json           # JSON array with metadata and timing
 ai-cli jobs --running        # Only running jobs; combines with watch/json
 ai-cli jobs --watch --json   # One compact JSON array per refresh (NDJSON)
+ai-cli adopt                 # Read-only JSON candidates for MCP session adoption
 ```
 
 The table shows status (spinner / ✓ / ✗ / ? for lost), agent, resolved model and
@@ -184,6 +185,47 @@ also carry `agentOutputTruncated`. Read the disk logs for larger output. `ai-cli
 monitoring snapshot. CLI `run` waits up to 15 seconds for the metadata handshake;
 timeout still returns PID/jobId, a warning and exit 0. Track that job; do not dispatch again.
 `jobs` is read-only and also works with `AI_CLI_WORKER=1`.
+
+### Automatic takeover of orphaned jobs
+
+MCP sessions automatically take over eligible jobs from the same project when the
+original dispatching session ends. This runs before the new server is ready and
+once per 60-second GC cycle, including when the new session starts before the old
+one closes. No prompt or tool call is normally needed.
+
+The project directory is the MCP server's cwd, captured at construction and stored
+as `projectDir` on new MCP jobs. Claude Code's stdio MCP cwd was verified to match
+the session's working directory. New jobs must match that directory exactly;
+older jobs without `projectDir` qualify when `workFolder` equals it or is underneath
+it, respecting path boundaries. Windows comparisons ignore case; other platforms
+preserve case. This prevents another project's active session from taking your jobs.
+Set `AI_CLI_AUTO_ADOPT=off` to disable automatic takeover; manual adoption remains available.
+
+| Interface | Action |
+| --- | --- |
+| MCP `adopt` | Manual fallback for cross-project takeover. Omit `pid` and `jobId` to list candidates, or provide either or both to adopt. A PID selects its latest job, and both selectors must agree. |
+| CLI `ai-cli adopt` | Read-only candidate JSON. PID/jobId arguments are rejected; use the receiving MCP session's tool. CLI `ps` / `result` / `wait` / `kill` already see all jobs. |
+
+Candidates include `projectDir` (`null` for older jobs) and `autoAdopt`, indicating
+whether they are within this MCP's automatic scope (the current cwd for CLI previews).
+
+Only durable MCP jobs with `meta.json` and a verified runner identity are eligible.
+The original dispatching session must have ended: an absent PID or a different OS
+creation identity proves this; identity lookup failure refuses adoption. Jobs with
+no principal can also be adopted. Adoption works throughout execution and for
+30 minutes after completion, subject to the shared capacity limits below; it never
+restarts execution or extends retention. Adopted jobs immediately appear in this
+session's `list_processes`, `get_result`, `wait`, `peek` and `kill_process`.
+List/result items carry `adopted: true`; list items also include `model`. Verbose results include the complete
+`adoptedFrom` history of original principal/server identities and adoption times.
+
+An existing `adopt.lock` always refuses adoption. Automatic takeover skips it and
+logs it once per job per server process; a competing completed takeover is skipped
+silently. The manual error gives its full path,
+holder PID and creation time (or `unknown`). Only after confirming that no session
+is adopting this job, such as after the adopting MCP crashed, manually delete that
+file and retry. Stale locks are never removed automatically: concurrent stale-lock
+removal could delete another session's new lock and let both transfers succeed.
 
 Finished and lost jobs are retained for 30 minutes. Writers collect at startup and
 every 60 seconds on an unref timer, removing the oldest finished jobs when the shared store exceeds

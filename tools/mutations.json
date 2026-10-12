@@ -1758,8 +1758,8 @@
   {
     "name": "[jobs] readonly binary clears updater notice",
     "file": "src/bin/ai-cli.ts",
-    "from": "  if (process.argv[2] !== 'mcp' && process.argv[2] !== 'jobs') {",
-    "to": "  if (process.argv[2] !== 'mcp') {",
+    "from": "  if (process.argv[2] !== 'mcp' && process.argv[2] !== 'jobs' && process.argv[2] !== 'adopt') {",
+    "to": "  if (process.argv[2] !== 'mcp' && process.argv[2] !== 'adopt') {",
     "expect": "binary worker jobs preserves updater state and stdout JSON",
     "script": "verify-jobs.mjs"
   },
@@ -2077,5 +2077,173 @@
     "to": "  if (/^(?:node|nodejs)(?:\\.exe)?$/i.test(processName(identity))) {\n    return true;",
     "expect": "principal retains ordinary Node and rejects title lookalikes",
     "script": "verify-principal-process.mjs"
+  },
+  {
+    "name": "adopt: ignore live principal",
+    "file": "src/core/job-store.ts",
+    "to": "    return 'dead';",
+    "expect": "adopt rejects a live original principal",
+    "script": "verify-adopt.mjs",
+    "from": "    return current.started === principal.started ? 'alive' : 'dead';"
+  },
+  {
+    "name": "adopt: allow unknown identity",
+    "file": "src/core/job-store.ts",
+    "to": "    // Mutation: allow unknown identity.",
+    "expect": "adopt fails closed when original principal identity is unavailable",
+    "script": "verify-adopt.mjs",
+    "from": "    if (state !== 'dead') throw new AdoptionError('無法確認原派工者已結束 (cannot confirm the original dispatching session has ended).', 'ineligible');"
+  },
+  {
+    "name": "adopt: delete existing lock and retry",
+    "file": "src/core/job-store.ts",
+    "to": "      rmSync(lockPath, { force: true });\n      fd = openSync(lockPath, 'wx', 0o600);",
+    "expect": "adopt rejects every existing lock without deleting or retrying",
+    "script": "verify-adopt.mjs",
+    "from": "      const lock = json<{ principal?: ProcessIdentity; createdAt?: string }>(lockPath);\n      throw new AdoptionError(`Adoption lock exists: ${lockPath}; holder PID: ${lock?.principal?.pid ?? 'unknown'}; created at: ${lock?.createdAt ?? 'unknown'}. 若確定沒有其他 session 正在接管這個 job（例如接管中的 MCP 當掉），請手動刪除此檔後重試。`, 'locked');"
+  },
+  {
+    "name": "adopt: skip metadata reread",
+    "file": "src/core/job-store.ts",
+    "to": "      const current = verified;",
+    "expect": "adopt rechecks metadata inside lock after asynchronous verification",
+    "script": "verify-adopt.mjs",
+    "from": "      const current = readJobMeta(directory, verified.jobId, false);"
+  },
+  {
+    "name": "adopt: skip owner comparison",
+    "file": "src/core/job-store.ts",
+    "to": "",
+    "expect": "adopt rechecks metadata inside lock after asynchronous verification",
+    "script": "verify-adopt.mjs",
+    "from": " || !unchangedOwner(current.principal, verified.principal) || !unchangedOwner(current.server, verified.server)"
+  },
+  {
+    "name": "adopt: leave adoption lock behind",
+    "file": "src/core/job-store.ts",
+    "to": "    } finally { /* Mutation: leave the adoption lock behind. */ }",
+    "expect": "adopt removes its lock after success and critical-section rejection",
+    "script": "verify-adopt.mjs",
+    "from": "    } finally { rmSync(lockPath, { force: true }); }"
+  },
+  {
+    "name": "adopt: keep original server",
+    "file": "src/core/job-store.ts",
+    "to": "      const meta: JobMeta = { ...current, principal: this.principal, server: current.server,",
+    "expect": "adopt switches server identity for subsequent lost-process checks",
+    "script": "verify-adopt.mjs",
+    "from": "      const meta: JobMeta = { ...current, principal: this.principal, server: this.server,"
+  },
+  {
+    "name": "adopt: overwrite transfer history",
+    "file": "src/core/job-store.ts",
+    "to": "adoptedFrom: [{ principal: current.principal, server: current.server, adoptedAt: new Date().toISOString() }]",
+    "expect": "adopt appends complete history in chronological transfer order",
+    "script": "verify-adopt.mjs",
+    "from": "adoptedFrom: [...(current.adoptedFrom ?? []), { principal: current.principal, server: current.server, adoptedAt: new Date().toISOString() }]"
+  },
+  {
+    "name": "adopt: readonly binary clears updater notice",
+    "file": "src/bin/ai-cli.ts",
+    "script": "verify-adopt.mjs",
+    "expect": "adopt CLI preserves startup notice and drains large JSON output",
+    "to": "  if (process.argv[2] !== 'mcp' && process.argv[2] !== 'jobs') {",
+    "from": "  if (process.argv[2] !== 'mcp' && process.argv[2] !== 'jobs' && process.argv[2] !== 'adopt') {"
+  },
+  {
+    "name": "auto-adopt: remove project scope",
+    "file": "src/core/job-store.ts",
+    "from": "export function inAutoAdoptScope(meta: Pick<JobMeta, 'projectDir' | 'workFolder'>, projectDir: string): boolean {\n  const directory = meta.projectDir === undefined ? meta.workFolder : meta.projectDir;\n  if (typeof directory !== 'string') return false;\n  const normalize = (value: string) => { const full = normalizeProjectDir(value); return process.platform === 'win32' ? full.toLowerCase() : full; };\n  const folder = normalize(directory), root = normalize(projectDir);\n  if (meta.projectDir !== undefined) return folder === root;\n  return folder === root || folder.startsWith(root.endsWith(sep) ? root : root + sep);\n}",
+    "to": "export function inAutoAdoptScope(meta: Pick<JobMeta, 'projectDir' | 'workFolder'>, projectDir: string): boolean {\n  return true;\n}",
+    "expect": "auto-adopt leaves different-project metadata unchanged",
+    "script": "verify-adopt.mjs"
+  },
+  {
+    "name": "auto-adopt: ignore legacy path boundary",
+    "file": "src/core/job-store.ts",
+    "from": "folder.startsWith(root.endsWith(sep) ? root : root + sep)",
+    "to": "folder.startsWith(root)",
+    "expect": "auto-adopt legacy scope includes descendants and rejects neighboring prefixes",
+    "script": "verify-adopt.mjs"
+  },
+  {
+    "name": "auto-adopt: ignore off switch",
+    "file": "src/core/job-store.ts",
+    "from": "process.env.AI_CLI_AUTO_ADOPT !== 'off'",
+    "to": "true",
+    "expect": "auto-adopt off disables startup and GC while preserving manual takeover",
+    "script": "verify-adopt.mjs"
+  },
+  {
+    "name": "auto-adopt: skip original principal liveness",
+    "file": "src/core/job-store.ts",
+    "from": "    const state = await principalState(verified.principal, lookup);",
+    "to": "    const state = automatic ? 'dead' : await principalState(verified.principal, lookup);",
+    "expect": "auto-adopt refuses a live original principal",
+    "script": "verify-adopt.mjs"
+  },
+  {
+    "name": "auto-adopt: omit GC adoption",
+    "file": "src/core/job-store.ts",
+    "from": "      await this.autoAdoptJobs();",
+    "to": "      // Mutation: omit automatic adoption.",
+    "expect": "auto-adopt GC takes over after the original session ends",
+    "script": "verify-adopt.mjs"
+  },
+  {
+    "name": "auto-adopt: repeat lock diagnostics",
+    "file": "src/core/job-store.ts",
+    "from": " || this.reportedAdoptLocks.has(meta.jobId)",
+    "to": "",
+    "expect": "auto-adopt retains existing locks and logs each job only once",
+    "script": "verify-adopt.mjs"
+  },
+  {
+    "name": "auto-adopt: omit dispatched project directory",
+    "file": "src/core/job-store.ts",
+    "from": "      ...(this.source === 'mcp' ? { projectDir: this.projectDir } : {}),",
+    "to": "      // Mutation: omit project directory.",
+    "expect": "auto-adopt start persists normalized MCP project directory and omits it for CLI",
+    "script": "verify-adopt.mjs"
+  },
+  {
+    "name": "auto-adopt: discard requested list model",
+    "file": "src/core/process-service.ts",
+    "from": "      model: proc.model ?? proc.resolvedModel,",
+    "to": "      model: proc.resolvedModel,",
+    "expect": "auto-adopt list rows expose requested model with resolved fallback",
+    "script": "verify-adopt.mjs"
+  },
+  {
+    "name": "auto-adopt: accept expired identity evidence",
+    "file": "src/core/job-store.ts",
+    "from": "      const cached = this.identities.get(pid); return cached && Date.now() - cached.checkedAt < GC_INTERVAL_MS ? [[pid, cached.identity] as const] : [];",
+    "to": "      const cached = this.identities.get(pid); return cached ? [[pid, cached.identity] as const] : [];",
+    "expect": "auto-adopt rejects expired identity evidence and refreshes due GC despite throttling",
+    "script": "verify-adopt.mjs"
+  },
+  {
+    "name": "auto-adopt: include unqueried jobs",
+    "file": "src/core/job-store.ts",
+    "from": "    for (const meta of this.autoAdoptBatch) {",
+    "to": "    for (const meta of this.autoAdoptMetas()) {",
+    "expect": "auto-adopt excludes jobs created after its identity batch",
+    "script": "verify-adopt.mjs"
+  },
+  {
+    "name": "auto-adopt: trust changed batch ownership",
+    "file": "src/core/job-store.ts",
+    "from": "    if (expectedOwner && (!unchangedOwner(verified.principal, expectedOwner.principal) || !unchangedOwner(verified.server, expectedOwner.server))) throw new AdoptionError('Job ownership changed after the GC identity batch.', 'changed');",
+    "to": "    // Mutation: trust changed ownership.",
+    "expect": "auto-adopt rejects ownership changed after its identity batch",
+    "script": "verify-adopt.mjs"
+  },
+  {
+    "name": "auto-adopt: throttle due GC identity query",
+    "file": "src/core/job-store.ts",
+    "from": " && (this.readOnly || Date.now() - this.collectedAt < GC_INTERVAL_MS)",
+    "to": "",
+    "expect": "auto-adopt rejects expired identity evidence and refreshes due GC despite throttling",
+    "script": "verify-adopt.mjs"
   }
 ]

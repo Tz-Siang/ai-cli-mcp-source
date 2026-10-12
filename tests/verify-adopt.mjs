@@ -1,0 +1,493 @@
+/** 接管回歸：注入 OS 身分與存活資料，不啟動任何 AI CLI，也不接觸正式 job store。 */
+import '../tools/stubs/catalog-test-env.mjs';
+import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { basename, dirname, join, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { JobStore, atomicJson, GC_INTERVAL_MS, inAutoAdoptScope, jobResult, listAdoptCandidates, readJobMetas, RETENTION_MS } from '../dist/core/job-store.js';
+import { ProcessService } from '../dist/core/process-service.js';
+import { runCli } from '../dist/app/cli.js';
+
+const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+const temp = mkdtempSync(join(tmpdir(), 'ai-cli-adopt-'));
+const originalAutoAdopt = process.env.AI_CLI_AUTO_ADOPT;
+delete process.env.AI_CLI_AUTO_ADOPT;
+const ownPrincipal = { pid: process.ppid, started: 'own-principal', name: 'test-principal' };
+const ownServer = { pid: process.pid, started: 'own-server', name: 'test-server' };
+const rows = new Map([[ownPrincipal.pid, ownPrincipal], [ownServer.pid, ownServer]]);
+const alive = new Set();
+let nextPid = 900000;
+const id = (name, live = false) => {
+  const identity = { pid: ++nextPid, started: name, name };
+  if (live) { alive.add(identity.pid); rows.set(identity.pid, identity); }
+  return identity;
+};
+const realKill = process.kill;
+process.kill = function (pid, signal) {
+  if (pid > 900000 && pid < 910000) {
+    assert.equal(signal, 0, 'fake processes must never receive termination signals');
+    if (alive.has(pid)) return true;
+    throw Object.assign(new Error('synthetic process is absent'), { code: 'ESRCH' });
+  }
+  return realKill.call(process, pid, signal);
+};
+const lookup = async pids => new Map(pids.filter(pid => rows.has(pid)).map(pid => [pid, rows.get(pid)]));
+const stores = [];
+let passed = 0, failed = 0;
+async function test(name, fn) {
+  try { await fn(); passed++; console.log('PASS ' + name); }
+  catch (error) { failed++; console.log('FAIL ' + name + '\n' + error.stack); }
+}
+function fixture(dir, options = {}) {
+  const jobId = randomUUID(), runner = options.runner ?? id('runner', true);
+  const meta = { version: 1, jobId, pid: runner.pid, agent: 'codex', model: 'fixture-model', resolvedModel: 'fixture-model',
+    task: 'task summary for adoption', workFolder: ROOT, startTime: new Date().toISOString(), source: 'mcp',
+    principal: id('original-principal'), server: id('original-server'), runner, worker: id('worker', true), recoverable: true,
+    ...options.meta };
+  const directory = join(dir, 'jobs', jobId); mkdirSync(directory, { recursive: true });
+  const path = join(directory, 'meta.json');
+  atomicJson(options.bootstrap ? join(directory, 'bootstrap.json') : path, meta);
+  if (options.exitCode !== undefined) atomicJson(join(directory, 'exit.json'), { exitCode: options.exitCode, signal: null,
+    endTime: new Date().toISOString(), timedOut: false, killed: false });
+  writeFileSync(join(directory, 'stdout.log'), ''); writeFileSync(join(directory, 'stderr.log'), '');
+  return { meta, directory, path, lock: join(directory, 'adopt.lock') };
+}
+const contents = path => readFileSync(path, 'utf8');
+const metaOf = f => JSON.parse(contents(f.path));
+function snapshot(directory) { return Object.fromEntries(readdirSync(directory).map(name => [name, contents(join(directory, name))])); }
+async function store(dir, customLookup = lookup, source = 'mcp', principal = ownPrincipal, server = ownServer) {
+  const result = new JobStore(dir, source, true, customLookup); stores.push(result); await result.ready;
+  // 不依賴主機祖先鏈；每個模擬 MCP 的完整身分由測資決定。
+  result.principal = principal; result.server = server; result.scan();
+  return result;
+}
+function caseDir() { const dir = join(temp, randomUUID()); mkdirSync(dir); return dir; }
+async function automaticStore(dir, { projectDir = ROOT, principal = ownPrincipal, server = ownServer, customLookup = lookup, source = 'mcp', readOnly = false } = {}) {
+  const identities = async pids => {
+    const found = await customLookup(pids.filter(pid => pid !== process.pid && pid !== process.ppid));
+    if (pids.includes(process.pid)) found.set(process.pid, server);
+    if (pids.includes(process.ppid)) found.set(process.ppid, principal);
+    return found;
+  };
+  const s = new JobStore(dir, source, readOnly, identities, projectDir); stores.push(s); await s.ready; return s;
+}
+async function gcCycle(s) { s.collectedAt = -Infinity; s.checkedAt = -Infinity; await s.check(); s.collect(); await s.collectAll(); }
+function processService(s) { const ps = Object.create(ProcessService.prototype); ps.store = s; ps.processManager = new Map(); ps.ready = s.ready; return ps; }
+
+try {
+  await test('adopt rejects a live original principal without changing metadata', async () => {
+    const dir = caseDir(), f = fixture(dir, { meta: { principal: id('live-principal', true) } });
+    const s = await store(dir), before = contents(f.path);
+    await assert.rejects(s.adopt(f.meta.pid), /still alive/);
+    assert.equal(contents(f.path), before); assert(!existsSync(f.lock));
+  });
+  await test('adopt transfers dead principal and exposes adopted results immediately', async () => {
+    const dir = caseDir(), f = fixture(dir, { exitCode: 0 });
+    // bootstrap/exit/log 都必須原封不動；接管只能變 meta。
+    atomicJson(join(f.directory, 'bootstrap.json'), f.meta);
+    const before = snapshot(f.directory), s = await store(dir);
+    const ps = Object.create(ProcessService.prototype); ps.store = s; ps.processManager = new Map(); ps.ready = s.ready;
+    const result = await ps.adopt(f.meta.pid, f.meta.jobId);
+    assert.equal(result.adopted, true);
+    assert.deepEqual(metaOf(f).principal, ownPrincipal); assert.deepEqual(metaOf(f).server, ownServer);
+    assert.deepEqual(metaOf(f).adoptedFrom[0].principal, f.meta.principal);
+    assert.deepEqual(metaOf(f).adoptedFrom[0].server, f.meta.server);
+    assert(Number.isFinite(Date.parse(metaOf(f).adoptedFrom[0].adoptedAt)));
+    assert.equal(s.list()[0].adopted, true); assert.equal(ps.listProcesses()[0].adopted, true);
+    assert.equal(ps.getProcessResult(f.meta.pid).adopted, true);
+    assert.equal(ps.getProcessResult(f.meta.pid).adoptedFrom, undefined);
+    assert.deepEqual(ps.getProcessResult(f.meta.pid, true).adoptedFrom, metaOf(f).adoptedFrom);
+    assert.equal((await ps.waitForProcesses([f.meta.pid], 1))[0].status, 'completed');
+    assert.equal((await ps.peekProcesses([f.meta.pid], 1)).processes[0].status, 'completed');
+    assert.equal((await ps.killProcess(f.meta.pid)).status, 'completed');
+    for (const [name, value] of Object.entries(before)) if (name !== 'meta.json') assert.equal(contents(join(f.directory, name)), value);
+    assert(!existsSync(f.lock));
+    const restarted = await store(dir); assert.equal(restarted.list()[0].adopted, true);
+  });
+  await test('adopt permits PID reuse with a different creation identity', async () => {
+    const dir = caseDir(), principal = id('reused-principal', true), f = fixture(dir, { meta: { principal } });
+    rows.set(principal.pid, { ...principal, started: 'new-process' });
+    const s = await store(dir); assert.equal((await s.adopt(undefined, f.meta.jobId)).adopted, true);
+  });
+  await test('adopt fails closed when original principal identity is unavailable', async () => {
+    for (const mode of ['throw', 'missing', 'empty-started']) {
+      const dir = caseDir(), principal = id('unknown-principal', true), f = fixture(dir, { meta: { principal } });
+      const s = await store(dir, async pids => {
+        if (pids.includes(principal.pid)) {
+          if (mode === 'throw') throw Error('OS query failure');
+          return mode === 'missing' ? new Map() : new Map([[principal.pid, { ...principal, started: '' }]]);
+        }
+        return lookup(pids);
+      });
+      const before = contents(f.path);
+      await assert.rejects(s.adopt(f.meta.pid), /無法確認原派工者已結束/);
+      assert.equal(contents(f.path), before); assert(!existsSync(f.lock));
+      assert.deepEqual(await s.adopt(), []);
+    }
+  });
+  await test('adopt refuses bootstrap-only and unfinished runner metadata', async () => {
+    for (const bootstrap of [true, false]) {
+      const dir = caseDir(), f = fixture(dir, { bootstrap, ...(bootstrap ? {} : { meta: { runner: { pid: nextPid + 1, started: '', name: 'runner' } } }) });
+      const s = await store(dir), before = snapshot(f.directory);
+      await assert.rejects(s.adopt(f.meta.pid), /bootstrap-only/);
+      assert.deepEqual(snapshot(f.directory), before);
+    }
+  });
+  await test('adopt already-owned response leaves files unchanged', async () => {
+    const dir = caseDir(), f = fixture(dir, { meta: { principal: ownPrincipal, server: ownServer } }), s = await store(dir);
+    const before = snapshot(f.directory), mtime = statSync(f.path).mtimeMs;
+    assert.equal((await s.adopt(f.meta.pid)).alreadyOwned, true);
+    assert.deepEqual(snapshot(f.directory), before); assert.equal(statSync(f.path).mtimeMs, mtime);
+  });
+  await test('adopt rejects unknown receiving principal or server', async () => {
+    for (const missing of ['principal', 'server']) {
+      const dir = caseDir(), f = fixture(dir), s = await store(dir); s[missing] = null;
+      const before = snapshot(f.directory);
+      await assert.rejects(s.adopt(f.meta.pid), new RegExp(missing + ' identity is unknown'));
+      await assert.rejects(s.adopt(), new RegExp(missing + ' identity is unknown'));
+      assert.deepEqual(snapshot(f.directory), before);
+    }
+  });
+  await test('adopt rejects every existing lock without deleting or retrying', async () => {
+    const live = id('lock-holder', true), dead = id('dead-lock-holder');
+    for (const lockText of [JSON.stringify({ principal: live, createdAt: 'live-time' }), JSON.stringify({ principal: dead, createdAt: 'dead-time' }), 'not JSON', 'null', '']) {
+      const dir = caseDir(), f = fixture(dir), s = await store(dir);
+      writeFileSync(f.lock, lockText); const before = snapshot(f.directory);
+      await assert.rejects(s.adopt(f.meta.pid), error => {
+        assert(error.message.includes(f.lock)); assert.match(error.message, /請手動刪除此檔後重試/);
+        const parsed = (() => { try { return JSON.parse(lockText); } catch { return null; } })();
+        assert(error.message.includes(String(parsed?.principal?.pid ?? 'unknown')));
+        assert(error.message.includes(parsed?.createdAt ?? 'unknown')); return true;
+      });
+      assert.deepEqual(snapshot(f.directory), before);
+    }
+  });
+  await test('adopt reports an absolute lock path for a relative state directory', async () => {
+    const dir = caseDir(), f = fixture(dir), originalCwd = process.cwd();
+    writeFileSync(f.lock, 'unreadable holder'); const before = snapshot(f.directory);
+    try {
+      process.chdir(temp);
+      const s = await store(basename(dir));
+      await assert.rejects(s.adopt(f.meta.pid), error => { assert(error.message.includes(f.lock)); return true; });
+      assert.deepEqual(snapshot(f.directory), before);
+    } finally { process.chdir(originalCwd); }
+  });
+  await test('adopt rechecks metadata inside lock after asynchronous verification', async () => {
+    for (const field of ['principal', 'server']) {
+      const dir = caseDir(), old = id('old-reused-principal', true), f = fixture(dir, { meta: { principal: old } });
+      rows.set(old.pid, { ...old, started: 'reused' });
+      let changed;
+      const s = await store(dir, async pids => {
+        if (pids.includes(old.pid)) { changed = { ...metaOf(f), [field]: id('changed-' + field, true) }; atomicJson(f.path, changed); }
+        return lookup(pids);
+      });
+      await assert.rejects(s.adopt(f.meta.pid), /驗證期間已被其他 session 接管或變更/);
+      assert.deepEqual(metaOf(f), changed); assert(!existsSync(f.lock));
+    }
+  });
+  await test('adopt removes its lock after success and critical-section rejection', async () => {
+    const dir = caseDir(), f = fixture(dir), s = await store(dir);
+    await s.adopt(f.meta.pid); assert(!existsSync(f.lock));
+    const dir2 = caseDir(), old = id('changing-principal', true), f2 = fixture(dir2, { meta: { principal: old } });
+    rows.set(old.pid, { ...old, started: 'reused' });
+    const s2 = await store(dir2, async pids => {
+      if (pids.includes(old.pid)) atomicJson(f2.path, { ...metaOf(f2), principal: ownPrincipal });
+      return lookup(pids);
+    });
+    await assert.rejects(s2.adopt(f2.meta.pid), /驗證期間/); assert(!existsSync(f2.lock));
+  });
+  await test('adopt concurrent sessions permit exactly one successful transfer', async () => {
+    const dir = caseDir(), f = fixture(dir), s1 = await store(dir);
+    const s2 = await store(dir, lookup, 'mcp', id('second-session', true), id('second-server', true));
+    const results = await Promise.allSettled([s1.adopt(f.meta.pid), s2.adopt(f.meta.pid)]);
+    assert.equal(results.filter(r => r.status === 'fulfilled' && r.value.adopted).length, 1);
+    assert.equal(results.filter(r => r.status === 'rejected').length, 1);
+    assert.equal(metaOf(f).adoptedFrom.length, 1); assert(!existsSync(f.lock));
+  });
+  await test('adopt appends complete history in chronological transfer order', async () => {
+    const dir = caseDir(), firstPrincipal = id('first-session', true), firstServer = id('first-server', true);
+    const f = fixture(dir), s1 = await store(dir, lookup, 'mcp', firstPrincipal, firstServer);
+    await s1.adopt(f.meta.pid); const first = metaOf(f).adoptedFrom[0];
+    alive.delete(firstPrincipal.pid); rows.delete(firstPrincipal.pid);
+    const secondPrincipal = id('second-session', true), secondServer = id('second-server', true);
+    const s2 = await store(dir, lookup, 'mcp', secondPrincipal, secondServer);
+    const cached = s1.get(f.meta.pid); s2.jobs.set(f.meta.jobId, cached);
+    await s2.adopt(f.meta.pid);
+    const history = metaOf(f).adoptedFrom;
+    assert.equal(history.length, 2); assert.deepEqual(history[0], first);
+    assert.deepEqual(history[1].principal, firstPrincipal); assert.deepEqual(history[1].server, firstServer);
+    assert(Date.parse(history[1].adoptedAt) >= Date.parse(history[0].adoptedAt));
+    assert.deepEqual(metaOf(f).principal, secondPrincipal); assert.deepEqual(metaOf(f).server, secondServer);
+    assert.equal(s2.jobs.get(f.meta.jobId), cached); assert.deepEqual(cached.meta, metaOf(f));
+  });
+  await test('adopt candidate list is read-only and excludes ineligible jobs', async () => {
+    const dir = caseDir();
+    const good = [fixture(dir), fixture(dir, { exitCode: 0 }), fixture(dir, { exitCode: 1 }),
+      fixture(dir, { runner: id('dead-runner'), meta: { worker: null } }), fixture(dir, { meta: { principal: null, server: null } })];
+    const excluded = [fixture(dir, { meta: { principal: ownPrincipal } }), fixture(dir, { meta: { principal: id('live-owner', true) } }),
+      fixture(dir, { bootstrap: true }), fixture(dir, { meta: { source: 'cli' } })];
+    const s = await store(dir), all = [...good, ...excluded], before = all.map(f => snapshot(f.directory));
+    const candidates = await s.adopt();
+    assert.deepEqual(candidates.map(c => c.jobId).sort(), good.map(f => f.meta.jobId).sort());
+    assert.deepEqual(candidates.map(c => c.status).sort(), ['running', 'completed', 'failed', 'lost', 'running'].sort());
+    const first = candidates.find(c => c.jobId === good[0].meta.jobId);
+    assert.equal(first.pid, good[0].meta.pid); assert.equal(first.agent, good[0].meta.agent);
+    assert.equal(first.model, good[0].meta.resolvedModel); assert.equal(first.task, good[0].meta.task);
+    assert.equal(first.startTime, good[0].meta.startTime); assert.equal(first.workFolder, ROOT);
+    assert.deepEqual(first.principal, { pid: good[0].meta.principal.pid, name: good[0].meta.principal.name });
+    assert.equal(candidates.find(c => c.jobId === good[4].meta.jobId).principal, null);
+    assert.deepEqual(all.map(f => snapshot(f.directory)), before);
+    // CLI 沒有自身 principal，可列到 MCP 自己的 job 以外相同的候選。
+    const cliCandidates = await listAdoptCandidates(dir, lookup, ownPrincipal);
+    assert.deepEqual(cliCandidates.map(c => c.jobId).sort(), candidates.map(c => c.jobId).sort());
+    const nullOwned = good[4]; await s.adopt(nullOwned.meta.pid);
+    assert.equal(metaOf(nullOwned).adoptedFrom[0].principal, null);
+  });
+  await test('adopt PID selection uses latest job and rejects mismatched selectors', async () => {
+    const dir = caseDir(), runner = id('shared-runner', true);
+    const older = fixture(dir, { runner, meta: { startTime: '2026-01-01T00:00:00.000Z' } });
+    const newer = fixture(dir, { runner, meta: { startTime: '2026-01-02T00:00:00.000Z' } });
+    const s = await store(dir);
+    await assert.rejects(s.adopt(runner.pid, older.meta.jobId), /same latest job/);
+    assert.equal((await s.adopt(runner.pid)).jobId, newer.meta.jobId);
+    assert.equal(metaOf(older).adoptedFrom, undefined);
+    await s.adopt(undefined, older.meta.jobId); assert.equal(metaOf(older).adoptedFrom.length, 1);
+    for (const pid of [0, -1, 1.5, NaN]) await assert.rejects(s.adopt(pid), /positive integer/);
+    await assert.rejects(s.adopt(undefined, '../escape'), /UUID/);
+  });
+  await test('adopt switches server identity for subsequent lost-process checks', async () => {
+    const dir = caseDir(), f = fixture(dir), s = await store(dir);
+    await s.adopt(f.meta.pid); assert.deepEqual(metaOf(f).server, ownServer);
+    // 去掉 owned，才能釘住 server 歸屬真的換掉，而不是被 owned 條件掩蓋。
+    s.owned.clear(); s.readOnly = false; s.collectedAt = Date.now();
+    alive.delete(f.meta.runner.pid); alive.delete(f.meta.worker.pid); rows.delete(f.meta.runner.pid); rows.delete(f.meta.worker.pid);
+    await s.check(async pids => lookup(pids));
+    assert.equal(s.get(f.meta.pid).status, 'lost'); assert.equal(jobResult(s.get(f.meta.pid)).adopted, true);
+  });
+  await test('adopt does not extend completed job retention', async () => {
+    const dir = caseDir(), f = fixture(dir, { exitCode: 0 }), s = await store(dir);
+    const endTime = JSON.parse(contents(join(f.directory, 'exit.json'))).endTime;
+    await s.adopt(f.meta.pid);
+    assert.equal(s.get(f.meta.pid).endTime, endTime);
+    assert.deepEqual(s.collect(Date.parse(endTime) + RETENTION_MS), [f.meta.pid]);
+    assert(!existsSync(f.directory));
+  });
+  await test('adopt CLI store rejects writes and CLI command returns candidates only', async () => {
+    const dir = caseDir(), f = fixture(dir), s = await store(dir, lookup, 'cli');
+    await assert.rejects(s.adopt(f.meta.pid), /CLI stores cannot adopt/);
+    await assert.rejects(s.adopt(), /CLI stores cannot adopt/);
+    const output = [], errors = [], expected = await listAdoptCandidates(dir, lookup);
+    const deps = { stdout: t => output.push(t), stderr: t => errors.push(t), listAdoptCandidates: async () => expected };
+    assert.equal(await runCli(['adopt'], deps), 0); assert.deepEqual(JSON.parse(output.pop()), expected);
+    for (const args of [[String(f.meta.pid)], ['--pid', String(f.meta.pid)], ['--jobId', f.meta.jobId], ['--job-id', f.meta.jobId]]) {
+      assert.equal(await runCli(['adopt', ...args], deps), 1); assert.match(errors.pop(), /receiving MCP session/);
+    }
+    const child = spawnSync(process.execPath, [join(ROOT, 'dist/bin/ai-cli.js'), 'adopt', String(f.meta.pid)], { encoding: 'utf8', timeout: 20000, windowsHide: true });
+    assert.equal(child.status, 1, child.stderr); assert.match(child.stderr, /CLI ps\/result\/wait\/kill already see all jobs/);
+    const listed = spawnSync(process.execPath, [join(ROOT, 'dist/bin/ai-cli.js'), 'adopt'], { encoding: 'utf8', timeout: 20000, windowsHide: true });
+    assert.equal(listed.status, 0, listed.stderr); assert(Array.isArray(JSON.parse(listed.stdout)));
+  });
+  await test('adopt CLI preserves startup notice and drains large JSON output', async () => {
+    const dir = caseDir(), jobs = [];
+    for (let i = 0; i < 40; i++) jobs.push(fixture(dir, { exitCode: 0, meta: { principal: null, server: null } }));
+    const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, encoding: 'utf8', windowsHide: true });
+    assert.equal(head.status, 0, head.stderr);
+    const noticePath = join(dir, 'update.json');
+    atomicJson(noticePath, { notice: 'fixture update notice', lastApplied: { at: new Date().toISOString(), from: 'old',
+      to: head.stdout.trim(), ok: true, commits: [], message: 'fixture update notice' } });
+    const before = contents(noticePath), jobFiles = jobs.map(f => snapshot(f.directory));
+    const env = { ...process.env, AI_CLI_STATE_DIR: dir, AI_CLI_UPDATE_REPO_ROOT: ROOT, AI_CLI_UPDATE_SKIP_STARTUP: '' };
+    const child = spawnSync(process.execPath, [join(ROOT, 'dist/bin/ai-cli.js'), 'adopt'], { env, encoding: 'utf8', timeout: 20000, windowsHide: true });
+    assert.equal(child.status, 0, child.stderr);
+    assert(Buffer.byteLength(child.stdout) > 8192, 'payload must exceed the macOS pipe buffer');
+    assert.deepEqual(JSON.parse(child.stdout).map(c => c.jobId).sort(), jobs.map(f => f.meta.jobId).sort());
+    assert.equal(contents(noticePath), before); assert.deepEqual(jobs.map(f => snapshot(f.directory)), jobFiles);
+    // 正對照：同一份有效 notice 若由一般入口啟動，確實會被清掉。
+    const control = spawnSync(process.execPath, [join(ROOT, 'dist/bin/ai-cli.js'), 'help'], { env, encoding: 'utf8', timeout: 20000, windowsHide: true });
+    assert.equal(control.status, 0, control.stderr); assert.equal(JSON.parse(contents(noticePath)).notice, null);
+  });
+  await test('auto-adopt scope normalizes paths and respects platform case rules', async () => {
+    const project = join(temp, 'CaseProject'), nested = join(project, 'nested');
+    assert(inAutoAdoptScope({ projectDir: project + sep, workFolder: temp }, project));
+    assert(inAutoAdoptScope({ workFolder: nested }, project + sep));
+    assert(!inAutoAdoptScope({ projectDir: nested, workFolder: project }, project));
+    assert(!inAutoAdoptScope({ workFolder: project + 'extra' }, project));
+    assert.equal(inAutoAdoptScope({ projectDir: project.toUpperCase(), workFolder: temp }, project), process.platform === 'win32');
+    assert.equal(inAutoAdoptScope({ workFolder: nested.toUpperCase() }, project), process.platform === 'win32');
+    if (process.platform === 'win32') {
+      assert(!inAutoAdoptScope({ workFolder: 'C:\\a\\bc' }, 'C:\\a\\b'));
+      assert(inAutoAdoptScope({ workFolder: 'C:\\A\\B\\child' }, 'c:\\a\\b\\'));
+    }
+  });
+  await test('auto-adopt ready exposes all same-project orphan statuses with ownership history', async () => {
+    const dir = caseDir(), fixtures = [fixture(dir, { meta: { projectDir: ROOT } }), fixture(dir, { exitCode: 0, meta: { projectDir: ROOT } }),
+      fixture(dir, { exitCode: 1, meta: { projectDir: ROOT } }), fixture(dir, { runner: id('gone-runner'), meta: { projectDir: ROOT, worker: null } })];
+    const s = await automaticStore(dir), ps = processService(s), listed = ps.listProcesses();
+    assert.equal(listed.length, 4); assert.deepEqual(listed.map(j => j.status).sort(), ['running', 'completed', 'failed', 'lost'].sort());
+    for (const f of fixtures) {
+      const meta = metaOf(f); assert.deepEqual(meta.principal, ownPrincipal); assert.deepEqual(meta.server, ownServer);
+      assert.equal(meta.adoptedFrom.length, 1); assert.deepEqual(meta.adoptedFrom[0].principal, f.meta.principal);
+      assert.equal(listed.find(j => j.jobId === f.meta.jobId).adopted, true); assert(!existsSync(f.lock));
+    }
+  });
+  await test('auto-adopt leaves different-project metadata unchanged', async () => {
+    const dir = caseDir(), f = fixture(dir, { meta: { projectDir: join(temp, 'other-project'), workFolder: ROOT } }), before = contents(f.path);
+    const s = await automaticStore(dir); assert.equal(s.list().length, 0); assert.equal(contents(f.path), before);
+  });
+  await test('auto-adopt legacy scope includes descendants and rejects neighboring prefixes', async () => {
+    const dir = caseDir(), projectDir = join(temp, 'legacy-project');
+    const inside = fixture(dir, { meta: { workFolder: join(projectDir, 'child') } });
+    const outside = [fixture(dir, { meta: { workFolder: projectDir + 'extra' } }), fixture(dir, { meta: { workFolder: temp } })];
+    const before = outside.map(f => contents(f.path)), s = await automaticStore(dir, { projectDir });
+    assert.deepEqual(s.list().map(j => j.jobId), [inside.meta.jobId]); assert.deepEqual(outside.map(f => contents(f.path)), before);
+  });
+  await test('auto-adopt refuses a live original principal', async () => {
+    const dir = caseDir(), f = fixture(dir, { meta: { projectDir: ROOT, principal: id('live-auto-owner', true) } }), before = contents(f.path);
+    const s = await automaticStore(dir); assert.equal(s.list().length, 0); assert.equal(contents(f.path), before);
+  });
+  await test('auto-adopt fails closed on missing or failed batched identity queries', async () => {
+    for (const mode of ['throw', 'missing', 'empty-started']) {
+      const dir = caseDir(), old = id('unknown-auto-owner', true), f = fixture(dir, { meta: { projectDir: ROOT, principal: old } }), before = contents(f.path);
+      const s = await automaticStore(dir, { customLookup: async pids => {
+        if (pids.includes(old.pid) && mode === 'throw') throw new Error('synthetic batch identity failure');
+        const result = await lookup(pids);
+        if (mode === 'missing') result.delete(old.pid);
+        if (mode === 'empty-started' && result.has(old.pid)) result.set(old.pid, { ...old, started: '' });
+        return result;
+      } });
+      assert.equal(s.list().length, 0); assert.equal(contents(f.path), before); assert(!existsSync(f.lock));
+    }
+  });
+  await test('auto-adopt batches original principal identity with GC worker lookup', async () => {
+    const dir = caseDir(), old = id('reused-auto-owner', true), f = fixture(dir, { meta: { projectDir: ROOT, principal: old } }), queries = [];
+    rows.set(old.pid, { ...old, started: 'reused-auto-pid' });
+    const s = await automaticStore(dir, { customLookup: async pids => { if (pids.length) queries.push([...pids]); return lookup(pids); } });
+    assert.equal(s.list().length, 1);
+    assert.equal(queries.length, 1, 'GC and adoption must not perform separate OS queries');
+    assert(queries[0].includes(old.pid)); assert(queries[0].includes(f.meta.runner.pid)); assert(queries[0].includes(f.meta.worker.pid));
+  });
+  await test('auto-adopt rejects expired identity evidence and refreshes due GC despite throttling', async () => {
+    const dir = caseDir(), old = id('cached-auto-owner', true), f = fixture(dir, { meta: { projectDir: ROOT, principal: old } }), before = contents(f.path);
+    const s = await automaticStore(dir);
+    s.identities.set(old.pid, { identity: { ...old, started: 'stale-unrelated-identity' }, checkedAt: Date.now() - GC_INTERVAL_MS });
+    await s.autoAdoptJobs(); assert.equal(s.list().length, 0); assert.equal(contents(f.path), before);
+    rows.set(old.pid, { ...old, started: 'reused-after-initial-batch' });
+    s.checkedAt = Date.now(); s.collectedAt = -Infinity;
+    await s.check(); await s.collectAll(); assert.equal(s.list()[0]?.jobId, f.meta.jobId);
+  });
+  await test('auto-adopt excludes jobs created after its identity batch', async () => {
+    const dir = caseDir(), old = id('batch-owner', true), f = fixture(dir, { meta: { projectDir: ROOT, principal: old } });
+    let late, before;
+    const s = await automaticStore(dir, { customLookup: async pids => {
+      const result = await lookup(pids);
+      if (pids.includes(old.pid) && !late) {
+        const current = { ...old, started: 'new-session-after-query' }; rows.set(old.pid, current);
+        late = fixture(dir, { meta: { projectDir: ROOT, principal: current } }); before = contents(late.path);
+      }
+      return result;
+    } });
+    assert.equal(s.list().length, 0); assert.equal(contents(late.path), before);
+    await gcCycle(s); assert.deepEqual(s.list().map(j => j.jobId), [f.meta.jobId]); assert.equal(contents(late.path), before);
+  });
+  await test('auto-adopt rejects ownership changed after its identity batch', async () => {
+    const dir = caseDir(), old = id('changing-batch-owner', true), f = fixture(dir, { meta: { projectDir: ROOT, principal: old } });
+    let changed;
+    const s = await automaticStore(dir, { customLookup: async pids => {
+      const result = await lookup(pids);
+      if (pids.includes(old.pid)) {
+        const current = { ...old, started: 'new-owner-after-query' }; rows.set(old.pid, current);
+        changed = { ...metaOf(f), principal: current }; atomicJson(f.path, changed);
+      }
+      return result;
+    } });
+    assert.equal(s.list().length, 0); assert.deepEqual(metaOf(f), changed); assert(!existsSync(f.lock));
+  });
+  await test('auto-adopt retains existing locks and logs each job only once', async () => {
+    const dir = caseDir(), f = fixture(dir, { meta: { projectDir: ROOT } }); writeFileSync(f.lock, 'stale lock');
+    const before = snapshot(f.directory), logs = [], originalError = console.error;
+    console.error = (...args) => logs.push(args.map(String).join(' '));
+    try {
+      const s = await automaticStore(dir); await gcCycle(s); await gcCycle(s);
+      assert.equal(s.list().length, 0); assert.equal(logs.length, 1); assert(logs[0].includes(f.lock));
+      assert.deepEqual(snapshot(f.directory), before);
+    } finally { console.error = originalError; }
+  });
+  await test('auto-adopt off disables startup and GC while preserving manual takeover', async () => {
+    const previous = process.env.AI_CLI_AUTO_ADOPT; process.env.AI_CLI_AUTO_ADOPT = 'off';
+    try {
+      const dir = caseDir(), f = fixture(dir, { meta: { projectDir: ROOT } }), before = contents(f.path), s = await automaticStore(dir);
+      await gcCycle(s); assert.equal(s.list().length, 0); assert.equal(contents(f.path), before);
+      await s.adopt(f.meta.pid); assert.equal(s.list()[0].adopted, true);
+    } finally { if (previous === undefined) delete process.env.AI_CLI_AUTO_ADOPT; else process.env.AI_CLI_AUTO_ADOPT = previous; }
+  });
+  await test('auto-adopt GC takes over after the original session ends', async () => {
+    const dir = caseDir(), old = id('later-ended-owner', true), f = fixture(dir, { meta: { projectDir: ROOT, principal: old } });
+    const s = await automaticStore(dir), ps = processService(s); assert.equal(ps.listProcesses().length, 0);
+    alive.delete(old.pid); rows.delete(old.pid); await gcCycle(s);
+    assert.equal(ps.listProcesses()[0].jobId, f.meta.jobId); assert.equal(ps.listProcesses()[0].adopted, true);
+    assert.equal(metaOf(f).adoptedFrom.length, 1);
+  });
+  await test('auto-adopt concurrent same-project sessions produce one owner without error logs', async () => {
+    const dir = caseDir(), f = fixture(dir, { meta: { projectDir: ROOT } }), logs = [], originalError = console.error;
+    console.error = (...args) => logs.push(args.map(String).join(' '));
+    try {
+      const [a, b] = await Promise.all([automaticStore(dir, { principal: id('auto-session-a', true), server: id('auto-server-a', true) }),
+        automaticStore(dir, { principal: id('auto-session-b', true), server: id('auto-server-b', true) })]);
+      assert.equal(a.list().length + b.list().length, 1); assert.equal(metaOf(f).adoptedFrom.length, 1); assert.equal(logs.length, 0);
+    } finally { console.error = originalError; }
+  });
+  await test('auto-adopt excludes read-only stores and CLI stores', async () => {
+    for (const settings of [{ readOnly: true }, { source: 'cli' }]) {
+      const dir = caseDir(), f = fixture(dir, { meta: { projectDir: ROOT } }), before = contents(f.path);
+      const s = await automaticStore(dir, settings);
+      assert.equal(contents(f.path), before); assert.equal(metaOf(f).adoptedFrom, undefined);
+      if (settings.readOnly) assert.equal(s.list().length, 0);
+    }
+  });
+  await test('auto-adopt start persists normalized MCP project directory and omits it for CLI', async () => {
+    const project = join(temp, 'launch-project');
+    for (const source of ['mcp', 'cli']) {
+      const dir = caseDir(), s = await automaticStore(dir, { source, projectDir: project + sep });
+      const job = s.start({ agent: 'codex', cliPath: process.execPath, args: ['-e', 'process.stdout.write("{}\\n")'], cwd: ROOT,
+        prompt: 'synthetic worker', resolvedModel: 'fixture-resolved' }, 'fixture-requested');
+      const expected = source === 'mcp' ? resolve(project) : undefined;
+      assert.equal(job.meta.projectDir, expected); assert.equal(JSON.parse(contents(join(job.directory, 'launch.tmp'))).meta.projectDir, expected);
+      const deadline = Date.now() + 15000;
+      while (!existsSync(join(job.directory, 'exit.json')) && Date.now() < deadline) await new Promise(done => setTimeout(done, 25));
+      assert(existsSync(join(job.directory, 'exit.json')), 'synthetic Node worker must finish');
+      assert.equal(JSON.parse(contents(join(job.directory, 'meta.json'))).projectDir, expected);
+    }
+  });
+  await test('auto-adopt candidates expose project directory and automatic scope flags', async () => {
+    const dir = caseDir(), project = join(temp, 'candidate-project'), cases = [
+      [fixture(dir, { meta: { projectDir: project, workFolder: temp } }), true],
+      [fixture(dir, { meta: { projectDir: temp, workFolder: project } }), false],
+      [fixture(dir, { meta: { workFolder: join(project, 'child') } }), true],
+      [fixture(dir, { meta: { workFolder: project + 'extra' } }), false]];
+    const s = new JobStore(dir, 'mcp', true, lookup, project); stores.push(s); await s.ready;
+    const mcp = await s.adopt(), cli = await listAdoptCandidates(dir, lookup, ownPrincipal, project);
+    assert.deepEqual(mcp, cli);
+    for (const [f, flag] of cases) {
+      const item = mcp.find(j => j.jobId === f.meta.jobId); assert.equal(item.autoAdopt, flag); assert.equal(item.projectDir, f.meta.projectDir ?? null);
+    }
+    await s.adopt(cases[1][0].meta.pid); assert.equal(s.list()[0].adopted, true, 'manual takeover must allow other projects');
+  });
+  await test('auto-adopt list rows expose requested model with resolved fallback', async () => {
+    const dir = caseDir(), requested = fixture(dir, { meta: { projectDir: ROOT, model: 'fixture-requested', resolvedModel: 'fixture-resolved' } });
+    const fallback = fixture(dir, { meta: { projectDir: ROOT, model: undefined, resolvedModel: 'fixture-fallback' } }), s = await automaticStore(dir);
+    for (const listed of [s.list(), processService(s).listProcesses()]) {
+      assert.equal(listed.find(j => j.jobId === requested.meta.jobId).model, 'fixture-requested');
+      assert.equal(listed.find(j => j.jobId === fallback.meta.jobId).model, 'fixture-fallback');
+    }
+  });
+} finally {
+  for (const s of stores) s.dispose();
+  if (originalAutoAdopt === undefined) delete process.env.AI_CLI_AUTO_ADOPT; else process.env.AI_CLI_AUTO_ADOPT = originalAutoAdopt;
+  process.kill = realKill;
+  rmSync(temp, { recursive: true, force: true });
+}
+console.log(`adopt: ${passed} passed, ${failed} failed`);
+if (failed) process.exitCode = 1;

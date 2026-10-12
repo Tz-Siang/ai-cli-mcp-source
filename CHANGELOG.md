@@ -8,6 +8,19 @@
 
 ## [Unreleased]
 
+### 新增
+
+- 依使用者「不要再用 prompt 接上」的要求，新增同專案自動接管，保留 MCP `adopt` 作跨專案備援與唯讀 `ai-cli adopt` 候選清單：
+  原派工 session 結束後，detached runner 仍繼續執行，
+  但新 session 因 principal 隔離看不到 job；直接改寫 meta 身分的權宜做法曾被自動模式分類器當成偽造行程身分擋下。
+  已實測 Claude Code 的 stdio MCP cwd 等於 session 工作目錄，因此以建構時 cwd 記錄 `projectDir`，只自動接同專案，
+  避免其他專案的活躍 session 搶走孤兒 job；舊 job 以 workFolder 的目錄邊界判定。ready 前與每個 GC 週期執行，
+  原 principal 查詢併入 GC 批次；`AI_CLI_AUTO_ADOPT=off` 可停用。先確認原 principal 已死，再同步鎖定、重讀並比對
+  principal／server，原子更新兩者並追加完整接管歷史；
+  可接管時間為執行期間全程＋結束後 30 分鐘（另受共用容量上限限制），不重跑、不延長保留期。
+  既有 lock 一律拒絕並給手動清理提示，避免兩方回收舊鎖時刪掉另一方新鎖、同時接管成功的競態。
+  接管後 list／result 帶 `adopted: true`，list 另帶 model，verbose result 帶 `adoptedFrom`；CLI 不決定接收 session，僅提供候選。（Codex，Claude 設計與派工）
+
 ### 修正（ai-cli-jobs 面板）
 
 - Grok job 在面板上被標成 `direct-api`：`inferAgent` 沒有 `grok-*` 規則，`grok-4.7` 落到 `<provider>-<model>` 那條。
