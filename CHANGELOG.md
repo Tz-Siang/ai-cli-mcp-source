@@ -37,6 +37,9 @@
 - `verify-durable-jobs` 偶發 `Unexpected end of JSON input`：測試觀測器以一般寫入產生 `heap.json`、`io-<pid>.json`，
   讀端一看到檔案存在就 `JSON.parse`，讀到寫一半就把例外拋出 `until`。改成讀不到完整 JSON 就等下一輪。2026-10-12 一次完整
   `npm test` 因此在 50 個 1 MiB job 的壓力測試誤報失敗，重跑即過；只動測試端。（Claude）
+- 突變「建議表推薦了已知不能用的模型（kimi-k3）」從 3c0ae2f 把 kimi-k3 移出 `KNOWN_BAD_MODELS`（慢但可用）起就一直 SURVIVED——
+  建議表推薦 kimi-k3 已不算違規，這筆什麼都沒測到。2026-10-12 跑 verify-alias-config 全部 43 筆突變時現形；改用仍在清單上的
+  `nv-meta/llama-3.2-11b-vision-instruct`，手動套用確認由指定斷言抓到。與紅線 7 同型：平常沒人跑整支腳本的突變。（Claude）
 
 ### 修正（ai-cli-jobs 面板）
 

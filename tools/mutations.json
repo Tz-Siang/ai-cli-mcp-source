@@ -567,10 +567,10 @@
     "script": "verify-alias-config.mjs"
   },
   {
-    "name": "建議表推薦了已知不能用的模型（kimi-k3）",
+    "name": "建議表推薦了已知不能用的模型（llama-3.2-11b-vision）",
     "file": "src/models/catalog.ts",
     "from": "    model: 'nv-openai/gpt-oss-20b',",
-    "to": "    model: 'nv-moonshotai/kimi-k3',",
+    "to": "    model: 'nv-meta/llama-3.2-11b-vision-instruct',",
     "expect": "建議表不可推薦已知不能用的模型",
     "script": "verify-alias-config.mjs"
   },
