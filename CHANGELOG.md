@@ -8,6 +8,13 @@
 
 ## [Unreleased]
 
+## [6.9.0] - 2026-10-12
+
+> 同專案自動接管：原派工 session 結束後，同一個專案新開的 session 會自動接手還在跑（或結束 30 分鐘內）的 job，不必下指令；
+> worker 底下的 MCP 不接、跨專案用手動 `adopt`，`AI_CLI_AUTO_ADOPT=off` 可關。另有 ai-cli-jobs 面板 0.1.2、codex 唯讀模式在 Windows
+> 讀不到檔的修正、Grok 派工定位。新增功能為主（SemVer MINOR）。看得到的行為變化：新增 MCP 工具 `adopt` 與 `ai-cli adopt`；
+> `list_processes` 每列多 `model`，被接管的帶 `adopted: true`；面板要 `claude plugin update`，auto 權限模式要 allow `mcp__ai-cli__list_processes`。
+
 ### 新增
 
 - 依使用者「不要再用 prompt 接上」的要求，新增同專案自動接管，保留 MCP `adopt` 作跨專案備援與唯讀 `ai-cli adopt` 候選清單：
