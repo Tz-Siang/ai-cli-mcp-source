@@ -2185,8 +2185,8 @@
   {
     "name": "auto-adopt: omit GC adoption",
     "file": "src/core/job-store.ts",
-    "from": "      if (adopt) await this.runAutoAdopt();",
-    "to": "      // Mutation: omit automatic adoption.",
+    "from": "  private async gcPass(): Promise<void> { this.collect(); await this.collectAll(); await this.runAutoAdopt(); }",
+    "to": "  private async gcPass(): Promise<void> { this.collect(); await this.collectAll(); }",
     "expect": "auto-adopt GC takes over after the original session ends",
     "script": "verify-adopt.mjs"
   },
@@ -2441,8 +2441,8 @@
   {
     "name": "auto-adopt: startup takeover blocks ready",
     "file": "src/core/job-store.ts",
-    "from": "    this.scan(); await this.check(); if (!this.readOnly) { this.collect(); await this.collectAll(false); }",
-    "to": "    this.scan(); await this.check(); if (!this.readOnly) { this.collect(); await this.collectAll(); }",
+    "from": "    this.scan(); await this.check(); if (!this.readOnly) { this.collect(); await this.collectAll(); }",
+    "to": "    this.scan(); await this.check(); if (!this.readOnly) { await this.gcPass(); }",
     "expect": "auto-adopt runs after ready without blocking it",
     "script": "verify-adopt.mjs"
   },
@@ -2469,5 +2469,21 @@
     "to": "      + ''",
     "expect": "Dispatch guidance: 換一家視角的審查",
     "script": "verify-job-usage.mjs"
+  },
+  {
+    "name": "auto-adopt: collection waits for adoption (ready inherits it via the shared single-flight)",
+    "file": "src/core/job-store.ts",
+    "from": "    this.collecting ??= collectStoreFiles(this.dir, Date.now(), pids => this.cachedLookup(pids)).then(() => this.scan())",
+    "to": "    this.collecting ??= collectStoreFiles(this.dir, Date.now(), pids => this.cachedLookup(pids)).then(async () => { await this.runAutoAdopt(); this.scan(); })",
+    "expect": "auto-adopt in progress never holds up collection",
+    "script": "verify-adopt.mjs"
+  },
+  {
+    "name": "auto-adopt: GC timer runs before startup finishes",
+    "file": "src/core/job-store.ts",
+    "from": "setInterval(() => { if (!this.initialized) return; void this.check(",
+    "to": "setInterval(() => { void this.check(",
+    "expect": "auto-adopt timer stays idle until startup finishes",
+    "script": "verify-adopt.mjs"
   }
 ]

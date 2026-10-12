@@ -78,7 +78,7 @@ async function automaticStore(dir, { projectDir = ROOT, useCwd = false, principa
   // 啟動那一輪接管在 ready 之後背景進行；等它的完成點，不靠 sleep。
   const s = new JobStore(dir, source, readOnly, identities, useCwd ? undefined : projectDir); stores.push(s); await s.ready; await s.autoAdoptSettled; return s;
 }
-async function gcCycle(s) { s.collectedAt = -Infinity; s.checkedAt = -Infinity; await s.check(undefined, true); s.collect(); await s.collectAll(); }
+async function gcCycle(s) { s.collectedAt = -Infinity; s.checkedAt = -Infinity; await s.check(undefined, true); await s.gcPass(); }
 function processService(s) { const ps = Object.create(ProcessService.prototype); ps.store = s; ps.processManager = new Map(); ps.ready = s.ready; return ps; }
 
 try {
@@ -380,7 +380,7 @@ try {
     await s.autoAdoptJobs(); assert.equal(s.list().length, 0); assert.equal(contents(f.path), before);
     rows.set(old.pid, { ...old, started: 'reused-after-initial-batch' });
     s.checkedAt = Date.now(); s.collectedAt = -Infinity;
-    await s.check(undefined, true); await s.collectAll(); assert.equal(s.list()[0]?.jobId, f.meta.jobId);
+    await s.check(undefined, true); await s.gcPass(); assert.equal(s.list()[0]?.jobId, f.meta.jobId);
   });
   await test('auto-adopt excludes jobs created after its identity batch', async () => {
     const dir = caseDir(), old = id('batch-owner', true), f = fixture(dir, { meta: { projectDir: ROOT, principal: old } });
@@ -596,7 +596,7 @@ try {
     s.collectedAt = -Infinity; s.checkedAt = -Infinity; await s.check(undefined, true);
     // 晚到的舊查詢改寫共用快取，不得影響這一輪已查到的「原 principal 仍活著」。
     s.identities.set(old.pid, { identity: { ...old, started: 'late-stale-query' }, checkedAt: Date.now() });
-    await s.collectAll(); assert.equal(s.list().length, 0); assert.equal(contents(f.path), before);
+    await s.gcPass(); assert.equal(s.list().length, 0); assert.equal(contents(f.path), before);
   });
   await test('adopt candidates batch identity lookups and skip directories deleted while listing', async () => {
     const dir = caseDir(), keep = fixture(dir), gone = fixture(dir, { exitCode: 0 }), calls = [];
@@ -697,6 +697,38 @@ try {
     } finally { release(); }
     await s.autoAdoptSettled;
     assert.deepEqual(s.list().map(j => j.jobId), [orphan.meta.jobId]);
+  });
+  await test('auto-adopt in progress never holds up collection', async () => {
+    // collectAll 是 single-flight，initialize 也會 await 它；接管若放進去，GC 計時器剛好在啟動期間觸發時 ready 會跟著等。
+    const dir = caseDir(); fixture(dir, { meta: { projectDir: ROOT } }); const gate = id('slow-gc-ancestor');
+    let release; const stuck = new Promise(done => { release = done; });
+    const principal = { ...id('slow-gc-chain', true), ppid: gate.pid };
+    const identities = async pids => {
+      const found = await lookup(pids.filter(pid => pid !== process.pid && pid !== process.ppid));
+      if (pids.includes(gate.pid)) await stuck;
+      if (pids.includes(process.pid)) found.set(process.pid, ownServer);
+      if (pids.includes(process.ppid)) found.set(process.ppid, principal);
+      return found;
+    };
+    const s = new JobStore(dir, 'mcp', false, identities, ROOT); stores.push(s);
+    try {
+      const started = await Promise.race([s.ready.then(() => 'ready'), new Promise(done => setTimeout(() => done('timeout'), 3000))]);
+      assert.equal(started, 'ready', 'ready must not wait for a takeover stuck on the ancestor lookup');
+      const collected = await Promise.race([s.collectAll().then(() => 'collected'), new Promise(done => setTimeout(() => done('timeout'), 3000))]);
+      assert.equal(collected, 'collected', 'collection must not wait for a takeover stuck on the ancestor lookup');
+    } finally { release(); }
+    await s.autoAdoptSettled;
+  });
+  await test('auto-adopt timer stays idle until startup finishes', async () => {
+    // 啟動中的計時器強制 check 會清快取、多查一輪，直接加在 ready 上；ready 之前一律跳過。
+    const dir = caseDir(); let calls = 0, release; const stuck = new Promise(done => { release = done; });
+    const identities = async pids => { calls++; if (pids.includes(process.pid)) await stuck; const found = await lookup(pids.filter(pid => pid !== process.pid && pid !== process.ppid)); if (pids.includes(process.pid)) found.set(process.pid, ownServer); if (pids.includes(process.ppid)) found.set(process.ppid, { ...id('gate-chain', true), ppid: 0 }); return found; };
+    const s = new JobStore(dir, 'mcp', false, identities, ROOT); stores.push(s);
+    try {
+      await new Promise(done => setTimeout(done, 2500));
+      assert.equal(calls, 1, `only the stuck startup lookup may run before ready, saw ${calls}`);
+    } finally { release(); }
+    await s.ready;
   });
 } finally {
   for (const s of stores) s.dispose();

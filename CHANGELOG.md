@@ -27,6 +27,8 @@
   複審後補：祖先鏈先比對 principal 是否為 job 的 worker，否則只從 principal 往上查 4 層（Windows 單次查詢實測中位數 430 ms）；
   家目錄取不到不再讓 check 失敗；無主候選的 `autoAdopt` 為 false；補 GC 計時器 force、bootstrap runner 祖先、缺 ppid 的測試。（Claude）
   啟動那一輪接管改到 ready 之後背景進行：原本在 ready 路徑上走祖先鏈，有同專案孤兒時第一個工具呼叫要多等（verify-liveness 因此偶發失敗）。（Claude）
+  另修：GC 計時器在啟動期間觸發時，initialize 會經由 `collectAll` 的 single-flight 等到它的接管；`collectAll` 改為只回收，
+  接管移到計時器專用的 `gcPass()`，計時器在 initialize 完成前不跑。（Claude）
 - **adopt 的稽核紀錄（2026-10-12）**：實作是 Codex gpt-6.1-sol（high）。opus（high）與 sonnet（high）兩路以唯讀模式獨立稽核；
   修正由另一個 opus（high）在獨立 clone 完成，sonnet 複審判定可合併，複審建議的 6 點同批補上。
   - Codex 第一輪先自己擋下主導者的原設計：殘留 lock 的自動回收有雙重接管競態（重現腳本 2 次嘗試 2 次成功、歷史被覆寫），
@@ -37,7 +39,12 @@
   - 成立、已修（低）：cwd／homedir 取不到會讓 MCP 或 check 失敗、開關只認小寫 off、刪 lock 失敗蓋掉成功結果、存活查詢抓了命令列、
     GC 到期時 wait／peek 繞過節流、自動接管讀共用快取的競態、候選清單整檔重讀 log 與逐筆查身分、欄位不一致、lock 訊息誤導。
   - 主導者實測追加：稽核修正把祖先鏈查詢放在 ready 路徑上，verify-liveness 偶發失敗（自動接管關閉 3/3 過、開啟 1/2 敗），
-    改為 ready 之後背景接管、祖先鏈最多查 4 層。
+    改為 ready 之後背景接管、祖先鏈最多查 4 層——**但這沒有修好**：最終版權威驗證仍是開啟 4 次敗 2、關閉 6/6 過。
+    插樁量測 ready 有時 7.6–8.3 秒（正常約 1.9 秒），而那兩次背景接管都在 ready 之後 3 ms 就完成。真正的根因是
+    `collectAll(adopt = true)` 在 single-flight 的 `collecting` 裡 await 接管：建構子每 2 秒的 GC 計時器若在 initialize 期間
+    觸發並先開了含接管的那一輪，initialize 的 `collectAll(false)` 拿到同一個 promise，ready 就等完接管。修法：`collectAll` 只回收，
+    接管移到只給計時器用的 `gcPass()`；計時器在 initialize 完成前一律跳過（它的強制 check 會清快取、多一輪查詢）。修後 5/5 過、
+    ready 1.9–3.2 秒。新增 2 條測試、2 筆突變，片段變更的 2 筆突變也重新手動驗過；sonnet 第三次複核判定根因成立、可合併。
   - 不成立：「`verify-adopt.mjs:288-291` 的子行程讀正式 store」——測試檔 import 的 `catalog-test-env.mjs` 已設 `AI_CLI_STATE_DIR`，子行程繼承。
   - 不修：「`/mcp` 重連後 alreadyOwned 不更新 server」屬 6.8.0 重啟接回的既有語意，lost 由全域 GC 判定；
     「MCP cwd＝session 工作目錄」只在 Claude Code 2.1.296 實測，其他 client 未驗證，文件已註明。（Claude）

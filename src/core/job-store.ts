@@ -385,6 +385,7 @@ export class JobStore {
   private autoAdoptSnapshot?: { metas: JobMeta[]; identities: Map<number, ProcessIdentity>; at: number };
   /** 祖先鏈判定只快取確定的結果；無法確認時下次需要再查。 */
   private ancestry?: 'worker' | 'none';
+  private initialized = false;
   /** 僅供測試：持有 adopt.lock 的同步臨界區內呼叫，預設不啟用。 */
   private adoptLockHeld?: () => void;
   readonly projectDir: string | null;
@@ -394,27 +395,34 @@ export class JobStore {
     this.ready = this.initialize();
     this.autoAdoptSettled = readOnly ? Promise.resolve() : this.ready.then(() => this.runAutoAdopt(), () => {});
     // 只有 GC 計時器到期那一路繞過 2 秒節流。
-    if (!readOnly) { this.timer = setInterval(() => { void this.check(this.lookup, Date.now() - this.collectedAt >= GC_INTERVAL_MS).then(async () => {
-      if (Date.now() - this.collectedAt >= GC_INTERVAL_MS) { this.collect(); await this.collectAll(); }
+    // 啟動完成前不讓計時器跑：它的強制 check 會清快取、多一輪 OS 查詢，直接加在 ready 上。
+    const started = () => { this.initialized = true; };
+    this.ready.then(started, started);
+    if (!readOnly) { this.timer = setInterval(() => { if (!this.initialized) return; void this.check(this.lookup, Date.now() - this.collectedAt >= GC_INTERVAL_MS).then(async () => {
+      if (Date.now() - this.collectedAt >= GC_INTERVAL_MS) await this.gcPass();
     }).catch(e => console.error('ai-cli jobs:', e)); }, 2000); this.timer.unref(); }
   }
   private async initialize(): Promise<void> {
     if (this.source === 'mcp') await this.identify();
     // 啟動時只回收、不接管；接管交給 autoAdoptSettled 在 ready 之後背景進行，check 建好的身分快照留給它用。
-    this.scan(); await this.check(); if (!this.readOnly) { this.collect(); await this.collectAll(false); }
+    this.scan(); await this.check(); if (!this.readOnly) { this.collect(); await this.collectAll(); }
   }
+  /** GC 計時器那一輪：回收後接管。接管不能放進 collectAll 的 single-flight，見 collectAll。 */
+  private async gcPass(): Promise<void> { this.collect(); await this.collectAll(); await this.runAutoAdopt(); }
   /** single-flight；錯誤只記 log。成功接管的 job 由 scan 納入。 */
   private runAutoAdopt(): Promise<void> {
     this.adopting ??= this.autoAdoptJobs().then(() => this.scan())
       .catch(e => console.error('ai-cli jobs auto-adopt:', e)).finally(() => { this.adopting = undefined; });
     return this.adopting;
   }
-  private collectAll(adopt = true): Promise<void> {
-    this.collecting ??= collectStoreFiles(this.dir, Date.now(), pids => this.cachedLookup(pids)).then(async () => {
-      // 每個 GC 週期回收後接管；啟動那一輪（adopt=false）延到 ready 之後。
-      if (adopt) await this.runAutoAdopt();
-      this.scan();
-    }).catch(e => console.error('ai-cli jobs GC:', e)).finally(() => { this.collecting = undefined; this.collectedAt = Date.now(); });
+  /**
+   * 只回收、不接管。這是 single-flight，initialize 也會 await 它：GC 計時器若剛好在啟動期間觸發，
+   * 而接管放在這個 promise 裡，ready 就會跟著等接管（含祖先鏈查詢）。2026-10-12 verify-liveness 實測
+   * ready 因此有時 7.6–8.3 秒（正常約 1.9 秒），6 秒結束的 stub 在 wait 開始前就跑完。
+   */
+  private collectAll(): Promise<void> {
+    this.collecting ??= collectStoreFiles(this.dir, Date.now(), pids => this.cachedLookup(pids)).then(() => this.scan())
+      .catch(e => console.error('ai-cli jobs GC:', e)).finally(() => { this.collecting = undefined; this.collectedAt = Date.now(); });
     return this.collecting;
   }
   /** 開關、cwd 與環境標記；祖先鏈判定較貴，只在真的有候選時才查。 */
