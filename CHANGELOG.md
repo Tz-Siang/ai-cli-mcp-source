@@ -27,6 +27,20 @@
   複審後補：祖先鏈先比對 principal 是否為 job 的 worker，否則只從 principal 往上查 4 層（Windows 單次查詢實測中位數 430 ms）；
   家目錄取不到不再讓 check 失敗；無主候選的 `autoAdopt` 為 false；補 GC 計時器 force、bootstrap runner 祖先、缺 ppid 的測試。（Claude）
   啟動那一輪接管改到 ready 之後背景進行：原本在 ready 路徑上走祖先鏈，有同專案孤兒時第一個工具呼叫要多等（verify-liveness 因此偶發失敗）。（Claude）
+- **adopt 的稽核紀錄（2026-10-12）**：實作是 Codex gpt-6.1-sol（high）。opus（high）與 sonnet（high）兩路以唯讀模式獨立稽核；
+  修正由另一個 opus（high）在獨立 clone 完成，sonnet 複審判定可合併，複審建議的 6 點同批補上。
+  - Codex 第一輪先自己擋下主導者的原設計：殘留 lock 的自動回收有雙重接管競態（重現腳本 2 次嘗試 2 次成功、歷史被覆寫），
+    改為既有 lock 一律拒絕、不自動回收。
+  - 成立、已修（高，兩路各自找到）：worker 底下的 ai-cli MCP 會自動接管，搶在使用者的新 session 之前把同專案孤兒接走。
+  - 成立、已修（中）：principal 為 null 一律判已死；根目錄／家目錄的舊 job 前綴規則跨專案誤接；兩條「並行接管」測試在同一行程、
+    臨界區同步，拿掉 `wx` 也會過——沒測到 lock。
+  - 成立、已修（低）：cwd／homedir 取不到會讓 MCP 或 check 失敗、開關只認小寫 off、刪 lock 失敗蓋掉成功結果、存活查詢抓了命令列、
+    GC 到期時 wait／peek 繞過節流、自動接管讀共用快取的競態、候選清單整檔重讀 log 與逐筆查身分、欄位不一致、lock 訊息誤導。
+  - 主導者實測追加：稽核修正把祖先鏈查詢放在 ready 路徑上，verify-liveness 偶發失敗（自動接管關閉 3/3 過、開啟 1/2 敗），
+    改為 ready 之後背景接管、祖先鏈最多查 4 層。
+  - 不成立：「`verify-adopt.mjs:288-291` 的子行程讀正式 store」——測試檔 import 的 `catalog-test-env.mjs` 已設 `AI_CLI_STATE_DIR`，子行程繼承。
+  - 不修：「`/mcp` 重連後 alreadyOwned 不更新 server」屬 6.8.0 重啟接回的既有語意，lost 由全域 GC 判定；
+    「MCP cwd＝session 工作目錄」只在 Claude Code 2.1.296 實測，其他 client 未驗證，文件已註明。（Claude）
 - `dispatchGuidance` 的 Grok 那列改寫成實測定位：換一家視角的審查、知識萃取與文件查證用 `grok-4.7` medium。
   依據是 2026-10-10 六項 × 兩輪與 2026-10-12 第二回（真實 repo 跨 9 檔功能、網路查證）評測，grok-4.7 與 gpt-6.1-sol／sonnet
   客觀判分全部平手，差別只在速度與成本，所以日常 coding 不換；另寫明 Grok 會讀使用者的全域 CLAUDE.md 與 MCP 設定、曾把知識庫條目
