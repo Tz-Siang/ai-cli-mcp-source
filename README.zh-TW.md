@@ -328,6 +328,27 @@ ai-cli doctor                 # 本機診斷與已保存的 update 區塊，不�
 都會在 pull 之前就中止；install／build／`doctor` 煙霧測試失敗則會**嘗試**回滾，而回滾本身也可能失敗。
 所以「一定傳出去了」和「應該沒傳出去」都不能假設。
 
+### 信任模型：`on` 代表什麼
+
+`AI_CLI_AUTO_UPDATE=on`（預設值）等於**信任 `origin` 上的每一次 push**：
+
+- 能 push 到 `origin` 的人——或盜用了 repo 擁有者 GitHub 帳號／token 的人——都能讓這台機器在下一輪檢查時
+  執行他們的程式碼，**不需要你做任何事**。
+- 「下次啟動生效」指的是 MCP server 換版；新程式碼**在背景更新當下就已經執行**：套件檔變動時的 `npm install`
+  會跑相依套件與本 repo 的 lifecycle scripts（例如 `prepare`），之後的 build 與 `doctor` 煙霧測試也跑在新程式碼上。
+- 這個 server 本身權限就大：`run` 沒帶 `capabilities` 時，會以各家的權限略過旗標啟動 agent
+  （claude 與 agy 的 `--dangerously-skip-permissions`、codex 的 `--dangerously-bypass-approvals-and-sandbox`、
+  Grok 的 `--always-approve`），並使用你本機的 CLI 登入。
+
+所以：
+
+- **只在你信任 `origin` 寫入者的機器上用 `on`**，例如你自己的機器追你自己的 repo。
+- 其他情況——`origin` 指向別人的 repo、共用機器、不確定誰有寫入權——用 `check`：只提示有新版，
+  看過更新內容再照上面的「手動操作」套用。
+- 維護者這端：GitHub 帳號開兩步驟驗證、寫入權限只給需要的人、保護 `master` 分支。
+
+npm／npx 安裝不受影響，本來就不會自動更新。
+
 ## 架構
 
 ```

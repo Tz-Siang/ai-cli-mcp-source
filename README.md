@@ -276,6 +276,34 @@ the pull, and a failed install, build or `doctor` smoke test triggers a rollback
 attempt — which can itself fail. So neither "it went everywhere" nor "it went
 nowhere" is safe to assume.
 
+### Trust model: what `on` means
+
+`AI_CLI_AUTO_UPDATE=on` (the default) means **trusting every push to `origin`**:
+
+- Anyone who can push to `origin` — or anyone who has taken over the repo owner's
+  GitHub account or token — can get this machine to run their code on its next check,
+  **with no action from you**.
+- "Takes effect on the next start" refers to the MCP server switching versions. The new
+  code **already runs during the background update**: when package files change,
+  `npm install` runs the lifecycle scripts of the dependencies and of this repo (such as
+  `prepare`), and the build and `doctor` smoke test that follow run the new code too.
+- This server is powerful to begin with: a `run` without `capabilities` starts each agent
+  with its vendor's permission bypass (`--dangerously-skip-permissions` for claude and
+  agy, `--dangerously-bypass-approvals-and-sandbox` for codex, `--always-approve` for
+  Grok), using your local CLI logins.
+
+So:
+
+- **Use `on` only on machines where you trust whoever can write to `origin`**, such as
+  your own machines tracking your own repo.
+- Otherwise — `origin` points at someone else's repo, the machine is shared, or you are
+  not sure who has write access — use `check`: it only reports a new version, and you
+  review the changes before applying them yourself.
+- On the maintainer side: turn on two-factor authentication for the GitHub account, give
+  write access only to the people who need it, and protect the `master` branch.
+
+npm/npx installs are unaffected; they never update themselves.
+
 ## Architecture
 
 ```

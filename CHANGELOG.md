@@ -79,6 +79,7 @@
 ### 變更（文件）
 
 - README 章節重排：兩份 README 改為簡介 → 快速開始 → 掛到 Claude Code → 各 agent（Grok CLI、direct-api）→ 自動更新 → 其餘進階章節，新讀者不再一開頭就撞上 Grok 的內部驗收細節。Grok 唯讀旗標與 F2 實機驗證點、重啟接回驗收指令這些維護者驗收內容移到 `tools/acceptance/README.md`，README 原處留連結；`package.json` 的 description 補上 Grok、keywords 加 `grok`。（Claude）
+- README「自動更新」補上信任模型一節（#15）：`on` 等於信任 `origin` 上的每一次 push——能 push 的人或盜用帳號／token 的人，都能讓所有原始碼安裝在下一輪檢查時執行他們的程式碼；新程式碼在背景 `npm install`（含 lifecycle scripts）、build 與 `doctor` 煙霧測試時就已執行，不是等到下次啟動，而 `run` 預設以各家的權限略過旗標啟動 agent。建議只在信任 `origin` 寫入者的機器用 `on`，其他用 `check`。預設值不變：這次只把風險寫清楚，改預設或改成只套用簽章版本留待日後再議。（Claude）
 
 ## [6.9.0] - 2026-10-12
 
