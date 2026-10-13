@@ -75,6 +75,11 @@
   刻意不做並行：幾支測試共用暫存 git，並行會 `ETIMEDOUT`。清單寫在 runner 裡，`tests/verify-*.mjs` 不在清單也不在排除清單
   （`verify-e2e`、`verify-strict-behaviour`）就開跑前報錯，避免新測試寫了卻沒進 `npm test`。runner 由新的 `verify-run-tests.mjs`
   用假測試驗證，並加三筆突變（失敗仍 exit 0、退回 fail-fast、拿掉未列入清單的檢查）。（Claude）
+  稽核（sonnet，唯讀）沒有必修項。新舊清單逐項比對一致（順序與 `verify-alias-config` 的 `--import`）。
+  幾條建議判定暫不修：行程樹多了一層 node，與行程祖先有關的測試（`verify-principal-process`、`verify-adopt` 等）
+  在 Windows 本機全綠，POSIX 交給 CI；清單檢查失敗時印完訊息直接 `process.exit(1)`，訊息遠小於 pipe 緩衝、退出碼不受影響；
+  `AI_CLI_TEST_MANIFEST`／`AI_CLI_TESTS_DIR` 對正式 `npm test` 也生效，已寫在 runner 檔頭；
+  spawn 失敗、重複列出、同時出現在排除清單這幾條路徑沒有突變。（判定：Claude）
 
 ### 變更（文件）
 
