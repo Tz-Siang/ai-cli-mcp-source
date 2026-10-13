@@ -2757,5 +2757,29 @@
     "from": "const failure = launchFailure(error); refreshJob(job); throw failure;",
     "to": "console.error(error);",
     "expect": "Windows launcher.ready write failure fails run"
+  },
+  {
+    "name": "run-tests：有測試失敗仍 exit 0",
+    "file": "tools/run-tests.mjs",
+    "script": "verify-run-tests.mjs",
+    "from": "process.exitCode = failed.length > 0 ? 1 : 0;",
+    "to": "process.exitCode = 0;",
+    "expect": "中間一支失敗時整體 exit 1"
+  },
+  {
+    "name": "run-tests：第一支失敗就停（退回 fail-fast）",
+    "file": "tools/run-tests.mjs",
+    "script": "verify-run-tests.mjs",
+    "from": "  results.push(result);\n}",
+    "to": "  results.push(result);\n  if (!ok) break;\n}",
+    "expect": "中間一支失敗後，後面的測試照跑"
+  },
+  {
+    "name": "run-tests：拿掉未列入清單的檢查",
+    "file": "tools/run-tests.mjs",
+    "script": "verify-run-tests.mjs",
+    "from": "if (unlisted.length > 0) {",
+    "to": "if (false) {",
+    "expect": "有未列入清單的 verify-*.mjs 時報錯 exit 1"
   }
 ]

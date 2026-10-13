@@ -21,7 +21,10 @@
 - 改完一定要能編譯：`npm run build`（或 `npm run typecheck`）必須零錯誤。
 - 驗證腳本都在 `tests/`（`tests/verify-*.mjs`）；新功能盡量補一支放這裡。每支用相對路徑往上一層讀 `dist/`、`src/`、`tools/`，新增時照抄既有那行 `const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))` 即可。
 - 有對應的驗證腳本時，跑過確認通過。
-- `npm test` 串起十六支驗證腳本（breaker / rate / direct-api / extra-body / alias-config / catalog-source / agy-parse / usage-parse / job-usage / exec-contract / mcp-capabilities / mcp-system-prompt / mcp / liveness / update / mutation-manifest），都不會打真實 AI 供應商或真實 origin。
+- `npm test`（`pretest` 先 build）由 `tools/run-tests.mjs` 依序跑完清單上每一支驗證腳本，最後印彙總表（PASS／FAIL、耗時）；任何一支 FAIL，整體 exit 1。一支失敗**不會**跳過後面的（3.1.0 起的 `&&` fail-fast 已改掉，見 CHANGELOG），所以一次就看得到全部的狀態。這些腳本都不會打真實 AI 供應商或真實 origin。
+  - 清單就是 runner 裡的 `TESTS` 陣列，以它為準。**新增測試**：把 `tests/verify-<名稱>.mjs` 的檔名加進 `TESTS`；需要額外 node 參數時寫成 `{ file, nodeArgs }`（例如 `verify-alias-config.mjs` 帶 `--import ./tools/stubs/catalog-test-env.mjs`）。
+  - 刻意不進 `npm test` 的放 `EXCLUDED`，每一支附一句理由（目前是 `verify-e2e.mjs` 與 `verify-strict-behaviour.mjs`）。`tests/verify-*.mjs` 只要既不在 `TESTS` 也不在 `EXCLUDED`，runner 開跑前就報錯 exit 1；`TESTS` 列了但檔案不存在也一樣。
+  - runner 一律依序執行、刻意不提供並行：幾支測試共用暫存 bare origin 與 A/B clone，並行會搶 git（CLAUDE.md 紅線 8）。runner 本身由 `tests/verify-run-tests.mjs` 用假測試驗證。
 - `verify-catalog-source.mjs` 涵蓋非同步查詢、單飛、10 分鐘 TTL、30 天磁碟快取及 agy 的逾時／stderr／kill；`verify-mcp.mjs` 對三個入口驗冷啟動 `tools/list < 1 秒` 與 `models` 等待規則。兩支自建暫存快取並使用 `tools/stubs/agy-models-*`，不連真實 vendor。
 - verify 腳本與突變 harness 載入 `tools/stubs/catalog-test-env.mjs`，隔離 config.json、providers、catalog-cache 與狀態，並設定 `AI_CLI_AUTO_UPDATE=off`、git 只允許 file 協定。alias-config 單跑也會自行載入，不碰使用者目錄。
 - `verify-update.mjs` 只在暫存 bare origin + A/B clone 內開啟更新；`AI_CLI_UPDATE_REPO_ROOT` 僅供測試，不要用來覆寫正式安裝。
