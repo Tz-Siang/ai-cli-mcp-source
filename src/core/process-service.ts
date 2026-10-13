@@ -151,14 +151,14 @@ export class ProcessService {
     this.poll.unref();
   }
 
-  startProcess(options: StartProcessOptions): {
+  async startProcess(options: StartProcessOptions): Promise<{
     pid: number;
     jobId?: string;
     status: string;
     agent: AgentId;
     message: string;
     warnings?: string[];
-  } {
+  }> {
     const cmd = buildCliCommand({
       ...options,
       cliPaths: this.cliPaths,
@@ -179,7 +179,7 @@ export class ProcessService {
 
     // Windows PTY 與一般 pipe 共用持久化 runner；POSIX agy 保留 legacy 路徑。
     if (cmd.agent !== 'antigravity' || isWin && spawnMode === 'pty') {
-      const job = this.store.start(cmd, options.model);
+      const job = await this.store.start(cmd, options.model);
       this.processManager.set(job.meta.jobId, job as unknown as ProcessEntry);
       return { pid: job.pid, jobId: job.meta.jobId, status: 'started', agent: cmd.agent, message: `${cmd.agent} process started successfully`, ...(cmd.warnings ? { warnings: cmd.warnings } : {}) };
     }

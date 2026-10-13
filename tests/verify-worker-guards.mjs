@@ -106,7 +106,7 @@ try {
     assert.equal(overrides.length, 6); assert(overrides.includes("mcp_servers.ai-cli.env.AI_CLI_ALLOW_NESTED='1'"));
   }));
   await check('F2 直接呼叫 ProcessService 與 FileProcessService 也拒絕', async () => withEnv({ AI_CLI_WORKER: '1' }, async () => {
-    assert.throws(() => new ProcessService({ cliPaths: paths }).startProcess({ workFolder: temp, prompt: 'stub', model: 'codex' }), /AI_CLI_NESTED_DISPATCH_BLOCKED/);
+    await assert.rejects(new ProcessService({ cliPaths: paths }).startProcess({ workFolder: temp, prompt: 'stub', model: 'codex' }), /AI_CLI_NESTED_DISPATCH_BLOCKED/);
     await assert.rejects(new FileProcessService({ stateDir: join(temp, 'state'), cliPaths: paths }).startProcess({ cwd: temp, prompt: 'stub', model: 'codex' }), /AI_CLI_NESTED_DISPATCH_BLOCKED/);
   }));
   await check('F2 CLI run 在依賴啟動前拒絕，不能被 stub runProcess 繞過', async () => withEnv({ AI_CLI_WORKER: '1' }, async () => {
@@ -118,7 +118,7 @@ try {
     const server = new AiCliMcpServer(); let launched = false;
     server.getCliConfigurationError = () => 'stub configuration unavailable';
     server.processService.startProcess = () => { launched = true; };
-    try { assert.throws(() => server.handleRun({}), e => e.message.includes(NESTED_DISPATCH_ERROR) && e.code === -32600); assert(!launched); }
+    try { await assert.rejects(server.handleRun({}), e => e.message.includes(NESTED_DISPATCH_ERROR) && e.code === -32600); assert(!launched); }
     finally { await server.cleanup(); }
   }));
   for (const [label, env, blocked] of [['無標記', {}, false], ['worker', { AI_CLI_WORKER: '1' }, true], ['worker opt-in', { AI_CLI_WORKER: '1', AI_CLI_ALLOW_NESTED: '1' }, false]]) {
@@ -173,7 +173,7 @@ try {
       const service = new ProcessService({ cliPaths: paths });
       await writeFile(join(temp, 'api-prompt.txt'), '[no-tools] 原始內容');
       for (const prompt of [undefined, '[no-tools] 續接內容']) {
-        const start = service.startProcess({ workFolder: temp, model: 'or-stub/model', session_id: 'guard-session', ...(prompt ? { prompt } : { prompt_file: 'api-prompt.txt' }) });
+        const start = await service.startProcess({ workFolder: temp, model: 'or-stub/model', session_id: 'guard-session', ...(prompt ? { prompt } : { prompt_file: 'api-prompt.txt' }) });
         const [result] = await service.waitForProcesses([start.pid], 5, true); assert.equal(result.status, 'completed');
       }
       assert.equal(bodies[0].messages[0].content, `${WORKER_CONTEXT}\n\n原始內容`); assert.equal(bodies[0].tools, undefined);
@@ -187,7 +187,7 @@ try {
     agent.spawnMode = 'pipe'; agent.win32SpawnMode = 'pipe'; agent.win32DirectExec = true;
     agent.buildCommand = input => { const built = saved.buildCommand(input); return { ...built, cliPath: process.execPath, args: [js, ...built.args] }; };
     try {
-      const service = new ProcessService({ cliPaths: paths }); const start = service.startProcess({ workFolder: temp, model: 'agy', prompt: '實送測試', session_id: 'resume-agy' });
+      const service = new ProcessService({ cliPaths: paths }); const start = await service.startProcess({ workFolder: temp, model: 'agy', prompt: '實送測試', session_id: 'resume-agy' });
       const [result] = await service.waitForProcesses([start.pid], 5, true); assert.equal(result.status, 'completed');
       const calls = (await readFile(trace, 'utf8')).trim().split('\n').map(JSON.parse); const args = calls.at(-1).args;
       assert.equal(args[args.indexOf('-p') + 1], `${WORKER_CONTEXT}\n\n實送測試`); assert(args.includes('resume-agy'));
@@ -203,7 +203,7 @@ try {
       const message = bodies.length === 1 ? { content: null, tool_calls: [{ id: 'bash-probe', type: 'function', function: { name: 'bash', arguments: JSON.stringify({ command }) } }] } : { content: 'finished' };
       return new Response(JSON.stringify({ choices: [{ message }] }), { headers: { 'Content-Type': 'application/json' } });
     };
-    try { const service = new ProcessService({ cliPaths: paths }); const start = service.startProcess({ workFolder: temp, model: 'or-stub/model', prompt: 'stub bash' }); const [result] = await service.waitForProcesses([start.pid], 5, true); assert.equal(result.status, 'completed'); const output = bodies[1].messages.find(m => m.role === 'tool').content; assert(output.includes('WORKER=1')); assert(output.includes(NESTED_DISPATCH_ERROR)); assert.equal(process.env.AI_CLI_WORKER, undefined); }
+    try { const service = new ProcessService({ cliPaths: paths }); const start = await service.startProcess({ workFolder: temp, model: 'or-stub/model', prompt: 'stub bash' }); const [result] = await service.waitForProcesses([start.pid], 5, true); assert.equal(result.status, 'completed'); const output = bodies[1].messages.find(m => m.role === 'tool').content; assert(output.includes('WORKER=1')); assert(output.includes(NESTED_DISPATCH_ERROR)); assert.equal(process.env.AI_CLI_WORKER, undefined); }
     finally { globalThis.fetch = oldFetch; }
   });
   await check('G1 PID 被外部新行程重用不屬於我們，父 PID 重用不認領孫輩', () => {

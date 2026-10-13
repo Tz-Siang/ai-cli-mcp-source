@@ -542,7 +542,7 @@ Note: antigravity (agy) does accept model selection — the resolved name is nor
     return this.jsonResult(getModelsPayload(written));
   }
 
-  private handleRun(toolArguments: Record<string, unknown>): ServerResult {
+  private async handleRun(toolArguments: Record<string, unknown>): Promise<ServerResult> {
     try { assertCanStartJob(); }
     catch (error) { throw new McpError(ErrorCode.InvalidRequest, (error as Error).message); }
     if (isFirstToolUse) {
@@ -554,7 +554,7 @@ Note: antigravity (agy) does accept model selection — the resolved name is nor
       throw new McpError(ErrorCode.InvalidParams, cliConfigurationError);
     }
     try {
-      const result = this.processService.startProcess({
+      const result = await this.processService.startProcess({
         prompt: toolArguments.prompt as string | undefined,
         prompt_file: toolArguments.prompt_file as string | undefined,
         workFolder: toolArguments.workFolder as string,

@@ -25,7 +25,7 @@ const TEMP = mkdtempSync(join(tmpdir(), 'ai-cli-pty-jobs-'));
 const state = join(TEMP, 'state');
 process.env.AI_CLI_STATE_DIR = state;
 const clients = new Set(), runners = new Set();
-let passed = 0, failed = 0;
+let passed = 0, failed = 0, nativeFaultFailed = false;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function until(fn, timeout = 20000) {
   const deadline = Date.now() + timeout;
@@ -40,7 +40,7 @@ const json = path => JSON.parse(readFileSync(path, 'utf8'));
 const stub = join(TEMP, 'stub.mjs');
 writeFileSync(stub, `import {spawn} from 'node:child_process'; import {writeFileSync} from 'node:fs';
 const spec=JSON.parse(process.argv[2]);
-if(spec.tree){const c=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore',windowsHide:true});writeFileSync(spec.tree,String(c.pid));}
+if(spec.tree){const c=spawn(process.execPath,['-e','setTimeout(()=>{},60000)'],{stdio:'ignore',windowsHide:true});writeFileSync(spec.tree,String(c.pid));}
 process.stdout.write('\\x1b[');
 setTimeout(()=>process.stdout.write('31mPTY_READY\\x1b[0m\\n'),100);
 setTimeout(()=>process.stdout.write('\\x1b]0;'+ 'title'.repeat(12)),150);
@@ -97,7 +97,17 @@ async function rawRunner(extra = {}, command = process.execPath, launch = {}) {
   return { dir, pid: child.pid, meta: json(join(dir, 'meta.json')) };
 }
 async function exited(job) {
-  await until(() => existsSync(join(job.dir, 'exit.json')), job.evidence ? 8000 : 20000);
+  // 真 node-pty 的 console kill 可先等 ready，再走 5 秒查詢退路；使用一般原生 PTY 期限。
+  try { await until(() => existsSync(join(job.dir, 'exit.json')), job.evidence && !job.nativePty ? 8000 : 20000); }
+  catch (error) {
+    if (job.nativePty) {
+      nativeFaultFailed = true;
+      const evidence = json(job.evidence), log = join(job.dir, 'stderr.log');
+      console.log('PTY native timeout evidence: ' + JSON.stringify({ directory: job.dir, evidence,
+        runnerAlive: mayBeAlive(job.pid), workerAlive: mayBeAlive(evidence.worker), stderr: existsSync(log) ? readFileSync(log, 'utf8') : '' }));
+    }
+    throw error;
+  }
   await until(() => !mayBeAlive(job.pid), 8000);
   return json(join(job.dir, 'exit.json'));
 }
@@ -120,11 +130,11 @@ if(${JSON.stringify(fault)}==='write'||${JSON.stringify(fault)}==='flush-write'&
 return original.write.call(this,fd,text,...args);};
 require('node:module').syncBuiltinESMExports();
 m._load=function(id,...args){if(id!=='@homebridge/node-pty-prebuilt-multiarch')return original.load.call(this,id,...args);
-if(${JSON.stringify(fault)}.startsWith('native-')){const native=original.load.call(this,id,...args);return{spawn(...args){const p=native.spawn(...args),kill=p.kill.bind(p);stats.worker=p.pid;persist();p.kill=()=>{stats.kills++;persist();return kill();};return p;}};}
+if(${JSON.stringify(fault)}.startsWith('native-')){const native=original.load.call(this,id,...args);return{spawn(...args){const p=native.spawn(...args),kill=p.kill.bind(p);stats.worker=p.pid;persist();p.kill=()=>{stats.kills++;stats.killReady=p._isReady;stats.deferred=p._deferreds?.length;persist();return kill();};return p;}};}
 return{spawn(){let data,exit;const p={pid:process.pid,onData(fn){data=fn;},onExit(fn){exit=fn;},kill(){stats.kills++;persist();if(stats.ended)throw Error('kill after exit');if(${JSON.stringify(fault)}==='kill-throws')throw Error('injected kill failure');}};
 if(${JSON.stringify(fault)}==='cleanup-stuck')setInterval(()=>{},1000);
 if(${JSON.stringify(fault)}!=='missing')p._agent={inSocket:{destroy(){if(${JSON.stringify(fault)}.startsWith('cleanup'))throw Error('injected release failure');}},_conoutSocketWorker:{dispose(){}}};
-setTimeout(()=>{if(${JSON.stringify(fault)}==='write'){data('first');data('second');}else if(${JSON.stringify(fault)}!=='async-failure')data('before\\n');},10);
+setTimeout(()=>{if(${JSON.stringify(fault)}==='write'){data('first');data('second');}else if(${JSON.stringify(fault)}==='ansi-only')data('\\x1b[?25l\\x1b[2J\\x1b[H');else if(${JSON.stringify(fault)}!=='async-failure')data('before\\n');},10);
 setTimeout(()=>{stats.ended=true;persist();exit({exitCode:${JSON.stringify(fault)}==='async-failure'?127:${JSON.stringify(extra.code ?? 0)}});
 if(${JSON.stringify(fault)}==='after-exit')queueMicrotask(()=>process.emit('SIGTERM'));
 setTimeout(()=>{data('LATE_DATA');persist();},50);},150);return p;}};};persist();}`);
@@ -138,7 +148,7 @@ await runJob(process.argv[2],{cleaner,lookup:async pids=>{if(pids.length===1){if
   const target = await rawRunner({ pty: true, ...extra }, process.execPath, { entry,
     env: { NODE_OPTIONS: `--require ${JSON.stringify(loader)}` } });
   if (fault.startsWith('native-')) assert.ok(Number.isInteger(json(evidence).worker), 'native spawn instrumentation must record its own worker');
-  return { ...target, evidence };
+  return { ...target, evidence, nativePty: fault.startsWith('native-') };
 }
 async function stopOwnWorker(identity) {
   if (!identity || !mayBeAlive(identity.pid)) return;
@@ -168,7 +178,7 @@ try {
     for (const start of ['\x1b]0;', '\x1bP']) {
       const clean = createAnsiCleaner(); assert.equal(clean.push(start), '');
       for (let i = 0; i < 3; i++) assert.equal(clean.push('x'.repeat(1000)), '');
-      assert.equal(clean.push('x'.repeat(2000)), ''); assert.equal(clean.push('visible'), 'visible');
+      assert.equal(clean.push('x'.repeat(2000)), start.slice(1) + 'x'.repeat(5000)); assert.equal(clean.push('visible'), 'visible');
     }
   });
   await test('PTY OSC matches stripAnsi and flush drops incomplete sequences', () => {
@@ -178,6 +188,10 @@ try {
     for (const text of ['\x1b[3', '\x1b]title', '\x1bPdata', '\x1b']) {
       const clean = createAnsiCleaner(); assert.equal(clean.push(text), ''); assert.equal(clean.flush(), ''); assert.equal(clean.push('visible'), 'visible');
     }
+  });
+  await test('PTY overlong OSC preserves plain text in the same chunk', () => {
+    const tail = ']0;' + 'x'.repeat(5000) + 'VISIBLE';
+    assert.equal(createAnsiCleaner().push('\x1b' + tail), tail);
   });
   await test('PTY resource release tolerates absent private fields and reports release', () => {
     for (const value of [undefined, {}, { _agent: {} }]) assert.equal(releaseExitedPty(value), false);
@@ -220,6 +234,19 @@ try {
     const target = await faultRunner('late'); assert.equal((await exited(target)).exitCode, 0);
     assert.equal(json(target.evidence).lateWrites, 0); assert.equal(json(target.evidence).writes, 1);
     assert.equal(readFileSync(join(target.dir, 'stdout.log'), 'utf8'), 'before\n');
+  });
+  await test('PTY received data with failed writes is never reported without output', async () => {
+    const target = await faultRunner('write', { code: 7 });
+    const exit = await exited(target); assert.equal(exit.exitCode, 7); assert.equal(exit.error, undefined);
+    const errors = readFileSync(join(target.dir, 'stderr.log'), 'utf8');
+    assert.match(errors, /PTY stdout write failed/); assert.doesNotMatch(errors, /without output/);
+    assert.equal((await storedResult(target)).status, 'failed');
+  });
+  await test('PTY control-only data with nonzero exit is reported without output', async () => {
+    const target = await faultRunner('ansi-only', { code: 7 });
+    const exit = await exited(target); assert.equal(exit.exitCode, 7); assert.match(exit.error ?? '', /PTY worker exited with code 7 without output/);
+    assert.equal(readFileSync(join(target.dir, 'stdout.log'), 'utf8'), '');
+    assert.equal((await storedResult(target)).status, 'failed');
   });
   await test('PTY missing worker identity uses owned console kill', async () => {
     const target = await faultRunner('native-kill', { args: [stub, JSON.stringify({ delay: 60000 })] });
@@ -281,14 +308,22 @@ try {
   await test('PTY kill_process writes killed true with failed 143 and terminates the tree', async () => {
     const tree = join(TEMP, 'descendant.txt'); const target = await dispatch(b, { delay: 60000, tree });
     await until(() => existsSync(tree)); const descendant = Number(readFileSync(tree, 'utf8'));
-    assert.equal((await b.call('kill_process', { pid: target.pid })).status, 'terminated');
-    const exit = await exited(target); assert.equal(exit.killed, true); assert.equal(exit.timedOut, false); assert.equal(exit.exitCode, 143);
-    await until(() => !mayBeAlive(descendant) && !mayBeAlive(target.meta.worker.pid));
-    const result = await b.call('get_result', { pid: target.pid, verbose: true });
-    assert.equal(result.status, 'failed'); assert.equal(result.exitCode, 143);
-    assert.match(readFileSync(join(target.dir, 'stderr.log'), 'utf8'), /Process terminated by user/);
-    // 與原 in-process 路徑共用 result shaper：有解析回覆時不另外回 raw stderr。
-    assert.equal(result.stderr, undefined);
+    const grandchild = (await lookupIdentities([descendant])).get(descendant);
+    try {
+      assert.equal((await b.call('kill_process', { pid: target.pid })).status, 'terminated');
+      const exit = await exited(target); assert.equal(exit.killed, true); assert.equal(exit.timedOut, false); assert.equal(exit.exitCode, 143);
+      await until(() => !mayBeAlive(descendant) && !mayBeAlive(target.meta.worker.pid));
+      const result = await b.call('get_result', { pid: target.pid, verbose: true });
+      assert.equal(result.status, 'failed'); assert.equal(result.exitCode, 143);
+      assert.match(readFileSync(join(target.dir, 'stderr.log'), 'utf8'), /Process terminated by user/);
+      // 與原 in-process 路徑共用 result shaper：有解析回覆時不另外回 raw stderr。
+      assert.equal(result.stderr, undefined);
+    } finally {
+      // tree kill 突變會留下孫行程：只終止建立時間仍相符的那一個。
+      if (grandchild?.started && mayBeAlive(descendant) && (await lookupIdentities([descendant])).get(descendant)?.started === grandchild.started) {
+        await promisify(execFile)('taskkill.exe', ['/pid', String(descendant), '/f'], { windowsHide: true }).catch(() => {});
+      }
+    }
   });
   await test('PTY stdout strips split ANSI and get_result wait parse the response', async () => {
     const target = await dispatch(b); const [result] = await b.call('wait', { pids: [target.pid], timeout: 20, verbose: true });
@@ -325,7 +360,7 @@ try {
   });
   await test('PTY rejects stdin prompt in store and old runner spec', async () => {
     const store = new JobStore(join(TEMP, 'stdin-store'), 'cli'); await store.ready;
-    try { assert.throws(() => store.start({ ...buildStub({ cwd: ROOT, prompt: '{}' }), stdinPrompt: 'secret' }), /do not support stdinPrompt/); }
+    try { await assert.rejects(store.start({ ...buildStub({ cwd: ROOT, prompt: '{}' }), stdinPrompt: 'secret' }), /do not support stdinPrompt/); }
     finally { store.dispose(); }
     const target = await rawRunner({ pty: true, stdin: true }); const exit = await exited(target);
     assert.match(exit.error, /do not support stdinPrompt/); assert.equal(target.meta.worker, null);
@@ -367,7 +402,7 @@ try {
     if (identities.get(meta.pid)?.started !== meta.runner.started || meta.worker && mayBeAlive(meta.worker.pid)) continue;
     await promisify(execFile)('taskkill.exe', ['/pid', String(meta.pid), '/t', '/f'], { windowsHide: true });
   }
-  if ([...runners].every(pid => !mayBeAlive(pid))) rmSync(TEMP, { recursive: true, force: true });
+  if (!nativeFaultFailed && [...runners].every(pid => !mayBeAlive(pid))) rmSync(TEMP, { recursive: true, force: true });
   else console.log('PTY evidence retained: ' + TEMP);
 }
 console.log(`PTY jobs: ${passed} passed, ${failed} failed`);

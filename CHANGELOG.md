@@ -10,6 +10,13 @@
 
 ### 修復
 
+- Windows 上 Claude Code 結束時，若 MCP server 在 stdin 關閉後 300ms 內未退出，
+  會終止 server 的整棵行程樹，先前連 Claude／Codex／Grok／agy 的持久化 job 也會被殺掉。
+  現在 runner 由短命 launcher 啟動，離開 server 的行程樹後才派 worker，job 可繼續執行與接管。（Codex）
+- 超長未完成的 ANSI 序列不再吞掉同一段輸出後面的文字。PTY worker 以非 0 結束時，
+  清掉 ANSI 控制碼後還有文字才算有輸出：ConPTY 啟動時送出的初始化控制碼不再讓
+  「沒有輸出」的診斷失效；有文字但 log 寫入失敗時，也不會誤報 worker 沒有輸出。（Codex，Claude 修正）
+
 - Windows agy（ConPTY）的背景工作關掉 session 就跟著被終止，新 session 也接不回來：
   agy 原本在 MCP server 行程內跑，沒有寫進 job store（6.8.0 預告的「6.9.0 處理」漏做了）。
   現在改由獨立 runner 持有，原 session 結束後 agy 繼續跑，同專案的新 session 會自動接管，
@@ -17,6 +24,36 @@
   使用者終止仍是 failed／exit 143；runner 收尾出錯也一定寫下結果，不會卡在 running；
   agy 輸出裡格式錯誤或不完整的 ANSI 序列不再扣住後面的輸出。
   POSIX agy 與 direct-api **仍不可接回／接管**。（Codex）
+- **agy durable job 與 launcher 的稽核紀錄（2026-10-13）**：前三輪實作是 Codex gpt-6.1-sol（high），第四輪修正改派 opus（high）；
+  sonnet（medium）唯讀稽核三輪，主導者 Claude 審 diff 並做真實環境驗收。
+  - 第一輪稽核，成立、已修：
+    - 高：`onExit` 任一步丟例外 → 沒有 exit.json，job 永遠 running。
+    - 中：格式錯誤的 CSI 被當成不完整序列、永久扣住輸出；未結束的 OSC／DCS 讓 carry 無上限、O(n²)。
+    - 低：stdout 關閉後 `onData` 可能寫進被重用的 fd；cleaner 與 `stripAnsi` 的 OSC 定義不一致。
+    - 兩條待確認改成實測：身分查詢失敗時 PTY job 殺不掉 → 改以 `ptyProc.kill()` 為退路；`pty.spawn` 遇到不存在的指令會同步丟 `File not found`。
+  - 第二輪複審：上述各條已修，另有 4 條新發現：
+    - 已修（中）：carry 超過 4096 時，把 ESC 之後整段（含正常文字）丟掉。
+    - 已修（低）：log 寫入失敗時誤報「without output」。
+    - 不修（低）：其餘兩條，列在下方已知限制。
+  - 主導者實測追加：
+    - 真實 Claude Code 退出時，有一次把 agy job 殺掉（留下 lost.json）。
+    - 從 claude.exe 取出 Windows 關閉 MCP 的流程：stdin 關閉後只等 300ms，之後 `taskkill /T /F` 整棵樹。
+    - runner 是 server 的子行程，所以**所有 agent** 的 durable job 都可能被砍 → 第三輪加上 launcher。
+    - 驗收時直接對 server 做 `taskkill /T /F`，因為 SDK 的 close 碰不到 300ms 門檻：真實 agy＋codex 存活，新 session 接管後皆 exit 0。
+    - 另驗：舊版 server 能接管並解析新格式 agy job；跨 session `kill_process` 1 秒內收掉 runner 與 agy.exe（exit 143、`killed: true`）。
+  - 第三輪稽核（launcher），有條件可合併。成立、已修：
+    - 中：「收到任何資料就算有輸出」連 ConPTY 初始化控制碼也算，「沒有輸出」的診斷因此失效。
+    - 中：突變把 server 提早關掉時，假 launcher 會變成永久孤兒行程，和實際觀察到的兩個殘留行程吻合。
+    - 中：runner 三條失敗路徑（等待中已有 exit.json、`launcher.ready` 逾時或 pid 不符、`launcher.ready` 寫入失敗）沒有測試。
+    - 低：runner 一啟動就刪 `launch.tmp`，清理掃描的保護因此失效，只剩 30 秒寬限。
+  - 判定不修：
+    - server 的 `launchFailure` 與 runner 的 `fail()` 互相覆寫 exit.json 的窄競態，兩邊結果都是 failed。
+    - `if (!pid)` 在 Windows 已不可達，POSIX 語意不變。
+  - 已知限制：
+    - 孤立的 ST 會留下 `\`。
+    - 自然退出與 kill 同時發生時記成 143。
+    - 超過 4096 的殘缺 ANSI 序列，payload 與之後才到的終結符會顯示成雜訊。
+    - launcher 存活的數十毫秒內若被 tree kill，job 根本不會啟動（worker 沒開、`run` 也沒回傳），目錄之後由清理掃描移除，不會留下 running。
 
 - ai-cli-jobs 面板 0.1.4：新 session 開場後，接管來的 job 要將近一分鐘才出現在面板上。面板只在開場 5 秒時查一次，之後每 60 秒才查一次；
   但伺服器要等 MCP ready 之後，才在背景查行程身分、完成接管。2026-10-13 在這台 Windows 連開三個 session 實測，

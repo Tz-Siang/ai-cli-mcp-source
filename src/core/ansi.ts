@@ -37,8 +37,8 @@ export function createAnsiCleaner() {
         if (complete) { cursor = at + complete[0].length; continue; }
         if (ANSI_PREFIX.test(tail)) {
           // 有界 carry：每次最多重掃 4096 字元；超長殘缺序列放棄，不扣住後續 chunk。
-          if (tail.length <= ANSI_CARRY_LIMIT) carry = tail;
-          return output.join('');
+          if (tail.length <= ANSI_CARRY_LIMIT) { carry = tail; return output.join(''); }
+          // 超過上限只丟 ESC；同一 chunk 後面的普通文字也必須保留。
         }
         // 格式錯誤只丟掉這個 ESC，後面的文字／新序列仍須立即處理。
         cursor = at + 1;

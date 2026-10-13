@@ -290,7 +290,7 @@ async function edgeChecks(ProcessService, FileProcessService, buildLiveness, emp
   check('File disappeared without report stays lost', lost.status === 'lost' && !('liveness' in lost));
 
   const service = new ProcessService({ cliPaths: { codex: stub, claude: stub, antigravity: stub } });
-  const run = service.startProcess({ model: 'gpt-5.5', prompt: 'Memory counters', workFolder: ROOT });
+  const run = await service.startProcess({ model: 'gpt-5.5', prompt: 'Memory counters', workFolder: ROOT });
   const entry = service.findProcess(run.pid);
   try {
     const originalListeners = entry.process.listenerCount('close');

@@ -174,7 +174,7 @@ if (!section || section === 'kill') {
   });
   await check('runner timeout records timeout and terminates worker', async () => {
     const store = new JobStore(join(TEMP, 'timeout')); await store.ready; await store.identify();
-    const job = store.start({ cliPath: process.execPath, args: [join(ROOT, 'tools/stubs/durable-agent.mjs'), 'codex'], cwd: ROOT, agent: 'codex', resolvedModel: 'stub', prompt: 'timeout stub', stdinPrompt: JSON.stringify({ delay: 60000 }) }, undefined, 100);
+    const job = await store.start({ cliPath: process.execPath, args: [join(ROOT, 'tools/stubs/durable-agent.mjs'), 'codex'], cwd: ROOT, agent: 'codex', resolvedModel: 'stub', prompt: 'timeout stub', stdinPrompt: JSON.stringify({ delay: 60000 }) }, undefined, 100);
     try {
       const [result] = await store.wait([job.pid], 15); assert.equal(result.status, 'failed');
       const exit = JSON.parse(readFileSync(join(job.directory, 'exit.json'))); assert.equal(exit.timedOut, true); assert.equal(exit.killed, false);
@@ -183,7 +183,7 @@ if (!section || section === 'kill') {
   });
   await check('runner spawn failure persists failed exit and removes stdin prompt', async () => {
     const store = new JobStore(join(TEMP, 'spawn-failure')); await store.ready;
-    const job = store.start({ cliPath: process.execPath, args: [], cwd: join(TEMP, 'missing-cwd'), agent: 'codex', resolvedModel: 'stub', prompt: 'failure stub', stdinPrompt: 'unused' });
+    const job = await store.start({ cliPath: process.execPath, args: [], cwd: join(TEMP, 'missing-cwd'), agent: 'codex', resolvedModel: 'stub', prompt: 'failure stub', stdinPrompt: 'unused' });
     const [result] = await store.wait([job.pid], 15); assert.equal(result.status, 'failed'); assert.equal(result.exitCode, 1);
     assert.equal(existsSync(join(job.directory, 'stdin.tmp')), false); assert.match(readFileSync(join(job.directory, 'stderr.log'), 'utf8'), /Process error/); store.dispose();
   });

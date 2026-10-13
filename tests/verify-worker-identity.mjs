@@ -700,7 +700,7 @@ await runCliLifecycle(async () => {
     else await chmod(jsPath, 0o755);
     for (const model of ['haiku', 'gpt-test']) {
       const service = new ProcessService({ cliPaths: { claude: stubPath, codex: stubPath, antigravity: 'DO-NOT-RUN' } });
-      const started = service.startProcess({ model, prompt: 'stub only', workFolder: temp, reasoning_effort: 'medium' });
+      const started = await service.startProcess({ model, prompt: 'stub only', workFolder: temp, reasoning_effort: 'medium' });
       await service.waitForProcesses([started.pid], 5, true);
       const result = runtime.serviceAdapter(service).read(started.pid);
       assert.equal(result.result.status, 'completed'); assert.equal(JSON.parse(result.stdout).result, '1');
@@ -715,7 +715,7 @@ await runCliLifecycle(async () => {
     globalThis.fetch = async () => { requests++; return new Response(JSON.stringify({ choices: [{ message: { content: 'A=沒有\nB=沒有' }, finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 1 } }), { headers: { 'Content-Type': 'application/json' } }); };
     try {
       const service = new ProcessService({ cliPaths: { claude: 'DO-NOT-RUN', codex: 'DO-NOT-RUN', antigravity: 'DO-NOT-RUN' } });
-      const run = service.startProcess({ model: 'or-stub/test', prompt: '[no-tools] stub', workFolder: temp });
+      const run = await service.startProcess({ model: 'or-stub/test', prompt: '[no-tools] stub', workFolder: temp });
       await service.waitForProcesses([run.pid], 2, true);
       const result = runtime.serviceAdapter(service).read(run.pid);
       assert.equal(run.agent, 'direct-api'); assert.equal(requests, 1); assert.equal(result.result.exitCode, 0); assert(result.stdout.includes('result'));

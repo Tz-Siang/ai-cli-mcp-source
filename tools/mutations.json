@@ -2586,8 +2586,8 @@
     "name": "PTY audit: cleanup success required to resolve",
     "file": "src/core/job-runner.ts",
     "script": "verify-pty-jobs.mjs",
-    "from": "        try {\n          try { const text = cleaner.flush(); if (text) writeSync(stdout, text); }\n          catch (error) { reportPtyError('PTY stdout flush failed', error); }\n          try {\n            releaseExitedPty(ptyProc);\n          } catch (error) { reportPtyError('PTY resource release failed', error); }\n        } finally { resolveClose({ code: exitCode, signal: null }); }",
-    "to": "          try { const text = cleaner.flush(); if (text) writeSync(stdout, text); }\n          catch (error) { reportPtyError('PTY stdout flush failed', error); }\n          try {\n            releaseExitedPty(ptyProc);\n            resolveClose({ code: exitCode, signal: null });\n          } catch (error) { reportPtyError('PTY resource release failed', error); }\n",
+    "from": "        try {\n          try { const text = cleaner.flush(); if (text) { ptyOutput = true; writeSync(stdout, text); } }\n          catch (error) { reportPtyError('PTY stdout flush failed', error); }\n          try {\n            releaseExitedPty(ptyProc);\n          } catch (error) { reportPtyError('PTY resource release failed', error); }\n        } finally { resolveClose({ code: exitCode, signal: null }); }",
+    "to": "          try { const text = cleaner.flush(); if (text) { ptyOutput = true; writeSync(stdout, text); } }\n          catch (error) { reportPtyError('PTY stdout flush failed', error); }\n          try {\n            releaseExitedPty(ptyProc);\n            resolveClose({ code: exitCode, signal: null });\n          } catch (error) { reportPtyError('PTY resource release failed', error); }\n",
     "expect": "PTY onExit release exceptions still persist correct results"
   },
   {
@@ -2602,8 +2602,8 @@
     "name": "PTY audit: carry has no limit",
     "file": "src/core/ansi.ts",
     "script": "verify-pty-jobs.mjs",
-    "from": "if (tail.length <= ANSI_CARRY_LIMIT) carry = tail;",
-    "to": "if (true) carry = tail;",
+    "from": "if (tail.length <= ANSI_CARRY_LIMIT) { carry = tail; return output.join(''); }",
+    "to": "if (true) { carry = tail; return output.join(''); }",
     "expect": "PTY incomplete OSC and DCS carry is bounded"
   },
   {
@@ -2653,5 +2653,109 @@
     "from": "const exitError = spec.pty && !ptyOutput",
     "to": "const exitError = false && !ptyOutput",
     "expect": "PTY asynchronous spawn failure reports a failed job with reason"
+  },
+  {
+    "name": "Launcher: server directly spawns runner",
+    "file": "src/core/job-store.ts",
+    "to": "const viaLauncher = false;",
+    "expect": "Windows server tree kill cannot terminate durable",
+    "script": "verify-launcher-jobs.mjs",
+    "from": "const viaLauncher = process.platform === 'win32';"
+  },
+  {
+    "name": "Launcher: activates before launcher exits",
+    "file": "src/core/job-store.ts",
+    "to": "await new Promise<void>((resolve, reject) => {\n          resolve();",
+    "expect": "Windows launcher returns runner PID and exits",
+    "script": "verify-launcher-jobs.mjs",
+    "from": "await new Promise<void>((resolve, reject) => {"
+  },
+  {
+    "name": "Launcher: ignores launch failure record",
+    "file": "src/core/job-store.ts",
+    "to": "throw error;\n      }\n    } else",
+    "expect": "Windows launcher failures persist failed exit",
+    "script": "verify-launcher-jobs.mjs",
+    "from": "throw launchFailure(error);\n      }\n    } else"
+  },
+  {
+    "name": "PTY audit: overlong control swallows same chunk text",
+    "file": "src/core/ansi.ts",
+    "to": "return output.join('');",
+    "expect": "PTY overlong OSC preserves plain text in the same chunk",
+    "script": "verify-pty-jobs.mjs",
+    "from": "// 超過上限只丟 ESC；同一 chunk 後面的普通文字也必須保留。"
+  },
+  {
+    "name": "PTY audit: failed writes appear without output",
+    "file": "src/core/job-runner.ts",
+    "to": "try { const text = cleaner.push(data); if (text) { writeSync(stdout, text); ptyOutput = true; } }",
+    "expect": "PTY received data with failed writes is never reported without output",
+    "script": "verify-pty-jobs.mjs",
+    "from": "try { const text = cleaner.push(data); if (text) { ptyOutput = true; writeSync(stdout, text); } }"
+  },
+  {
+    "name": "PTY audit: control codes count as output",
+    "file": "src/core/job-runner.ts",
+    "script": "verify-pty-jobs.mjs",
+    "from": "try { const text = cleaner.push(data); if (text) { ptyOutput = true; writeSync(stdout, text); } }",
+    "to": "ptyOutput = true; try { const text = cleaner.push(data); if (text) writeSync(stdout, text); }",
+    "expect": "PTY control-only data with nonzero exit is reported without output"
+  },
+  {
+    "name": "Launcher: runner deletes launch.tmp before activation",
+    "file": "src/core/job-runner.ts",
+    "script": "verify-launcher-jobs.mjs",
+    "from": "if (!options.waitForLauncher) rmSync(join(directory, 'launch.tmp'), { force: true });",
+    "to": "rmSync(join(directory, 'launch.tmp'), { force: true });",
+    "expect": "Windows runner returns without worker when exit.json appears while waiting"
+  },
+  {
+    "name": "Launcher: runner ignores exit.json while waiting",
+    "file": "src/core/job-runner.ts",
+    "script": "verify-launcher-jobs.mjs",
+    "from": "cancelled = !!readJobExit(directory);",
+    "to": "cancelled = false;",
+    "expect": "Windows runner returns without worker when exit.json appears while waiting"
+  },
+  {
+    "name": "Launcher: runner starts worker without valid activation",
+    "file": "src/core/job-runner.ts",
+    "script": "verify-launcher-jobs.mjs",
+    "from": "if (activation?.pid !== process.pid) {",
+    "to": "if (activation?.pid === -1) {",
+    "expect": "Windows runner launcher timeout or foreign PID fails without worker"
+  },
+  {
+    "name": "Launcher: confirmed runner keeps launch.tmp",
+    "file": "src/core/job-runner.ts",
+    "script": "verify-launcher-jobs.mjs",
+    "from": "remove('launcher.ready'); remove('launch.tmp');",
+    "to": "remove('launcher.ready');",
+    "expect": "Windows launcher returns runner PID and exits"
+  },
+  {
+    "name": "Launcher: runner exception leaves launch.tmp",
+    "file": "src/core/job-runner.ts",
+    "script": "verify-launcher-jobs.mjs",
+    "from": "if (!options.waitForLauncher) return execute(directory, options);",
+    "to": "return execute(directory, options);",
+    "expect": "Windows runner wait exceptions and identity failure never leave launch.tmp"
+  },
+  {
+    "name": "Launcher: wait exception escapes without failed exit",
+    "file": "src/core/job-runner.ts",
+    "script": "verify-launcher-jobs.mjs",
+    "from": "} catch (error) { console.error('ai-cli runner launcher wait:', error); }",
+    "to": "} catch (error) { throw error; }",
+    "expect": "Windows runner wait exceptions and identity failure never leave launch.tmp"
+  },
+  {
+    "name": "Launcher: launcher.ready write failure ignored",
+    "file": "src/core/job-store.ts",
+    "script": "verify-launcher-jobs.mjs",
+    "from": "const failure = launchFailure(error); refreshJob(job); throw failure;",
+    "to": "console.error(error);",
+    "expect": "Windows launcher.ready write failure fails run"
   }
 ]

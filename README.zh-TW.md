@@ -578,6 +578,8 @@ ai-cli PID）。窄終端機會截短欄位，避免換行。父行程可能是 
 Claude／Codex／Grok／Windows agy（ConPTY）的 MCP 與 CLI job 共用 `AI_CLI_STATE_DIR/jobs/<UUID>/`，
 預設為 `~/.local/state/ai-cli/jobs/`。每個 job 都由 detached runner 當 worker 的父行程，
 MCP server 或 CLI 啟動端退出後仍可繼續。對外 PID 為 runner PID；目錄 UUID 才是 job 身分。
+Windows 由短命 launcher 建立 runner，確認 launcher 已退出才派 worker；runner 不在 server 的行程樹內，
+因此 Claude Code 關閉 MCP 時即使終止整棵 server 行程樹，持久化 job 仍可繼續。POSIX 維持原有 detached 啟動方式。
 MCP 重啟只接回同一主導者（排除套件啟動器後的祖先 PID＋OS 建立時間）派的 job，結果附
 `recovered: true`，接回絕不重跑、重試或重派。有 `exit.json` 就還原完成／失敗；
 runner 身分相符且活著則繼續追蹤；runner 與 worker 都消失且無 exit 時標為 `lost`，保留輸出。

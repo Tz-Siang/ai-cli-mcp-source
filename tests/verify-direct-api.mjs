@@ -156,7 +156,7 @@ const service = new ProcessService({
   },
 });
 
-const started = service.startProcess({
+const started = await service.startProcess({
   workFolder: tempRoot,
   model: 'or-test/model',
   prompt: 'Read package.json and tell me the version',
@@ -210,7 +210,7 @@ assert.deepStrictEqual(savedSession.messages.map((message) => message.role), [
   'assistant',
 ]);
 
-const noToolsStarted = service.startProcess({
+const noToolsStarted = await service.startProcess({
   workFolder: tempRoot,
   model: 'or-test/model',
   prompt: '[no-tools] Say hello without tools',
@@ -223,7 +223,7 @@ assert.deepStrictEqual(capturedBodies[2].messages, [
   { role: 'user', content: `${WORKER_CONTEXT}\n\nSay hello without tools` },
 ]);
 
-const xmlStarted = service.startProcess({
+const xmlStarted = await service.startProcess({
   workFolder: tempRoot,
   model: 'or-test/model',
   prompt: 'Write XML fallback report',

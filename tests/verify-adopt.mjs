@@ -455,10 +455,11 @@ try {
     const project = join(temp, 'launch-project');
     for (const source of ['mcp', 'cli']) {
       const dir = caseDir(), s = await automaticStore(dir, { source, projectDir: project + sep });
-      const job = s.start({ agent: 'codex', cliPath: process.execPath, args: ['-e', 'process.stdout.write("{}\\n")'], cwd: ROOT,
+      const job = await s.start({ agent: 'codex', cliPath: process.execPath, args: ['-e', 'process.stdout.write("{}\\n")'], cwd: ROOT,
         prompt: 'synthetic worker', resolvedModel: 'fixture-resolved' }, 'fixture-requested');
       const expected = source === 'mcp' ? resolve(project) : undefined;
-      assert.equal(job.meta.projectDir, expected); assert.equal(JSON.parse(contents(join(job.directory, 'launch.tmp'))).meta.projectDir, expected);
+      // async launcher 返回時 runner 可能已讀掉 launch.tmp；bootstrap 永遠保留啟動摘要。
+      assert.equal(job.meta.projectDir, expected); assert.equal(JSON.parse(contents(join(job.directory, 'bootstrap.json'))).projectDir, expected);
       const deadline = Date.now() + 15000;
       while (!existsSync(join(job.directory, 'exit.json')) && Date.now() < deadline) await new Promise(done => setTimeout(done, 25));
       assert(existsSync(join(job.directory, 'exit.json')), 'synthetic Node worker must finish');

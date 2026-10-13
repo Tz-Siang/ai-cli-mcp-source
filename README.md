@@ -160,7 +160,7 @@ and the dispatching process's parent name plus the ai-cli PID. Narrow terminals
 truncate columns without wrapping. Parent names can be shells or Node launchers;
 if the OS cannot provide a name, the table shows `unknown`.
 
-Claude/Codex/Grok use `AI_CLI_STATE_DIR/jobs/<UUID>/` (default
+Claude/Codex/Grok and Windows agy (ConPTY) use `AI_CLI_STATE_DIR/jobs/<UUID>/` (default
 `~/.local/state/ai-cli/jobs/`). `meta.json` records the agent, model, effort,
 40-character task summary, work folder, session and principal/server/runner/worker
 identities. It contains no full prompt. The runner writes metadata and `exit.json`
@@ -168,6 +168,10 @@ atomically once each; the exit record includes code, signal, end time, timeout a
 kill flags. For lost jobs, the writer records the first confirmed loss in
 `lost.json` so a long-silent job's output still gets 30 minutes of retention.
 Worker stdout/stderr go directly to open `stdout.log`/`stderr.log` file descriptors.
+On Windows, a short-lived launcher starts the runner and exits before the job is
+dispatched. The returned PID remains the runner PID. This keeps durable jobs alive
+when Claude Code terminates the MCP server's entire process tree on shutdown.
+POSIX keeps its existing detached runner; POSIX agy and direct-api remain unrecoverable.
 A temporary stdin file carries the prompt independently of the server
 and is removed on completion. Logs can contain prompts or model response excerpts.
 `bootstrap.json` contains only startup metadata and the runner PID, so a failed meta

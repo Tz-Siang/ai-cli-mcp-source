@@ -17,16 +17,19 @@ let spawnCount = 0;
 cp.spawn = (_command, args = []) => {
   spawnCount++;
   const pid = nextPid++;
-  if (args[0]?.endsWith('job-runner.js')) {
+  if (args[0]?.endsWith('job-runner.js') || args[0]?.endsWith('job-launcher.js')) {
     // runner 現在有 meta handshake；假 spawn 同步模擬握手，仍不啟動 vendor。
     const dir = args[1], spec = JSON.parse(readFileSync(join(dir, 'launch.tmp'), 'utf8'));
     writeFileSync(join(dir, 'meta.json'), JSON.stringify({ ...spec.meta, pid, runner: { pid, started: 'stub', name: 'stub' }, worker: null }));
     writeFileSync(join(dir, 'stdout.log'), ''); writeFileSync(join(dir, 'stderr.log'), '');
     writeFileSync(join(dir, 'exit.json'), JSON.stringify({ exitCode: 0, signal: null, endTime: new Date().toISOString(), killed: false, timedOut: false }));
+    if (args[0].endsWith('job-launcher.js')) writeFileSync(join(dir, 'launcher.json'), JSON.stringify({ pid, launcherPid: pid }));
   }
-  return Object.assign(new EventEmitter(), {
+  const child = Object.assign(new EventEmitter(), {
     pid, stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough(), unref() {},
   });
+  if (args[0]?.endsWith('job-launcher.js')) queueMicrotask(() => child.emit('close', 0));
+  return child;
 };
 syncBuiltinESMExports();
 delete process.env.AI_CLI_DEFAULT_REASONING_EFFORT;
@@ -324,10 +327,10 @@ try {
       assert.deepEqual(resolveConfiguredReasoningEffortWithSource('codex-ultracode', value), { effort: 'ultra', source: 'env' });
     } finally { delete process.env.AI_CLI_DEFAULT_REASONING_EFFORT; }
   });
-  check('MCP start response forwards warning without real spawn', () => {
+  await checkAsync('MCP start response forwards warning without real spawn', async () => {
     const service = new ProcessService({ cliPaths: options.cliPaths, breaker: { check() {} } });
-    warning(service.startProcess({ ...options, reasoning_effort: 'ultra' }), 'ultra', 'explicit');
-    assert.equal(Object.hasOwn(service.startProcess({ ...options, reasoning_effort: 'medium' }), 'warnings'), false);
+    warning(await service.startProcess({ ...options, reasoning_effort: 'ultra' }), 'ultra', 'explicit');
+    assert.equal(Object.hasOwn(await service.startProcess({ ...options, reasoning_effort: 'medium' }), 'warnings'), false);
     assert.equal(spawnCount, 2);
   });
   await checkAsync('CLI run forwards ultra warnings without vendor spawn', async () => {

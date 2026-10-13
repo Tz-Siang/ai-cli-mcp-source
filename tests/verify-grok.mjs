@@ -174,7 +174,7 @@ if (!section || section === 'jobs') {
     const first = new JobStore(state, 'mcp'); stores.add(first); await first.ready;
     const cmd = buildCliCommand({ cliPaths: { grok: process.execPath }, model: 'grok-4.7', workFolder: ROOT,
       prompt: JSON.stringify({ release, capture }), session_id: 'original', system_prompt: 'system test' });
-    const job = first.start(cmd, 'grok-4.7'); await until(() => existsSync(join(job.directory, 'meta.json')) && existsSync(capture)); first.dispose();
+    const job = await first.start(cmd, 'grok-4.7'); await until(() => existsSync(join(job.directory, 'meta.json')) && existsSync(capture)); first.dispose();
     const second = new JobStore(state, 'mcp'); stores.add(second);
     try {
       await second.ready;
@@ -192,18 +192,18 @@ if (!section || section === 'jobs') {
   });
   await check('Grok result failure exit zero remains failed in durable runner', async () => {
     const store = new JobStore(join(TEMP, 'error')); stores.add(store); await store.ready;
-    const c = stubCommand({ ...input, prompt: JSON.stringify({ error: true }) }); const job = store.start(c);
+    const c = stubCommand({ ...input, prompt: JSON.stringify({ error: true }) }); const job = await store.start(c);
     const [result] = await store.wait([job.pid], 15); assert.equal(result.exitCode, 0); assert.equal(result.status, 'failed');
     assert.equal(jobResult(job, true).agentOutput.is_error, true);
     for (const spec of [{ subtype: 'error_during_execution' }, { stop_reason: 'cancelled' }]) {
-      const failed = store.start(stubCommand({ ...input, prompt: JSON.stringify(spec) }));
+      const failed = await store.start(stubCommand({ ...input, prompt: JSON.stringify(spec) }));
       const [r] = await store.wait([failed.pid], 15); assert.equal(r.status, 'failed');
       assert.match(r.agentOutput.error, /subtype=.*stop_reason=/); assert.ok(r.jobId);
     }
   });
   await check('Grok MCP and CLI process services select durable runner', async () => {
     const svc = new ProcessService({ cliPaths: { claude: '', codex: '', antigravity: '', grok: process.execPath } }); await svc.ready;
-    try { const { pid } = svc.startProcess({ model: 'grok-4.7', workFolder: ROOT, prompt: '{}' }); const result = (await svc.waitForProcesses([pid], 15))[0]; assert.equal(result.status, 'completed'); assert.equal(result.agent, 'grok'); }
+    try { const { pid } = await svc.startProcess({ model: 'grok-4.7', workFolder: ROOT, prompt: '{}' }); const result = (await svc.waitForProcesses([pid], 15))[0]; assert.equal(result.status, 'completed'); assert.equal(result.agent, 'grok'); }
     finally { svc.dispose(); }
     const file = new FileProcessService({ stateDir: join(TEMP, 'file-service'), cliPaths: { grok: process.execPath } });
     try {

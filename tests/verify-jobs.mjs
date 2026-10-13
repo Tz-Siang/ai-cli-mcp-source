@@ -371,7 +371,7 @@ process.stdin.resume(); process.stdin.on('data',data=>{clearInterval(timer);if(d
     agent.buildCommand = input => ({ cliPath: process.execPath, args: [vendor], cwd: input.cwd, agent: 'claude', prompt: input.prompt, resolvedModel: 'stub-resolved' });
     try {
       const service = new ProcessService({ cliPaths: { claude: '', codex: '', antigravity: '' } });
-      const started = service.startProcess({ prompt: '\nInspect stub task\nSECRET SECOND LINE', workFolder: dir, model: 'claude', reasoning_effort: 'high' });
+      const started = await service.startProcess({ prompt: '\nInspect stub task\nSECRET SECOND LINE', workFolder: dir, model: 'claude', reasoning_effort: 'high' });
       const find = async () => (await readLiveJobs(dir)).find(job => job.pid === started.pid);
       const first = await until(find); assert.equal(first.status, 'running'); assert.equal(first.task, 'Inspect stub task');
       assert.equal(first.model, 'stub-resolved'); assert.equal(first.reasoning_effort, 'high');
@@ -383,7 +383,7 @@ process.stdin.resume(); process.stdin.on('data',data=>{clearInterval(timer);if(d
       assert.equal((await find()).elapsedSec, elapsed);
       service.cleanupProcesses(); assert.equal(await find(), undefined);
       writeFileSync(vendor, 'setTimeout(()=>process.exit(7),100);');
-      const failedStart = service.startProcess({ prompt: 'Failed stub task', workFolder: dir, model: 'claude' });
+      const failedStart = await service.startProcess({ prompt: 'Failed stub task', workFolder: dir, model: 'claude' });
       await service.waitForProcesses([failedStart.pid], 10);
       // 不等 OS 查詢，以免兩秒 timer 補寫後掩蓋「close 沒立即發佈」的錯誤。
       const immediate = service.listProcesses().find(job => job.pid === failedStart.pid);

@@ -183,7 +183,7 @@ export class FileProcessService {
     }
     if (cmd.agent !== 'antigravity' || isWin && spawnMode === 'pty') {
       await this.store.ready; await this.store.identify();
-      const job = this.store.start(cmd, model);
+      const job = await this.store.start(cmd, model);
       const pending = this.waitForRunnerMeta(job.pid);
       pendingJobIdentities.add(pending);
       const warning = await pending.finally(() => pendingJobIdentities.delete(pending));

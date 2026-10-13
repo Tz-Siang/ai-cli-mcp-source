@@ -607,7 +607,7 @@ export class JobStore {
       try { rmSync(lockPath, { force: true }); } catch (error) { console.error(`ai-cli jobs: cannot remove adoption lock ${lockPath}:`, error); }
     }
   }
-  start(cmd: BuiltCommand, model?: string, timeoutMs?: number): StoredJob {
+  async start(cmd: BuiltCommand, model?: string, timeoutMs?: number): Promise<StoredJob> {
     const pty = process.platform === 'win32' && getAgent(cmd.agent).win32SpawnMode === 'pty';
     // ConPTY 沒有 stdin prompt 通道；現有 agy 只傳 -p argv，不可默默遺失未來的 prompt。
     if (pty && typeof cmd.stdinPrompt === 'string') throw new Error('PTY jobs do not support stdinPrompt');
@@ -632,17 +632,53 @@ export class JobStore {
     const spec: RunnerSpec = { command: cmd.cliPath, args: cmd.args, cwd: cmd.cwd, stdin: typeof cmd.stdinPrompt === 'string',
       needsShell: process.platform === 'win32' && !getAgent(cmd.agent).win32DirectExec, ...(pty ? { pty: true } : {}), timeoutMs, meta: metaBase, serverPid: process.pid, principalPid: this.principal?.pid ?? process.ppid };
     atomicJson(join(directory, 'launch.tmp'), spec);
-    const child = spawn(process.execPath, [fileURLToPath(new URL('./job-runner.js', import.meta.url)), directory], {
-      cwd: fileURLToPath(new URL('../../', import.meta.url)), env: buildWorkerEnv(), detached: true, stdio: 'ignore', windowsHide: true });
-    child.on('error', error => { const job = this.jobs.get(jobId); if (job) { job.status = 'failed'; job.closed = true; job.endTime = new Date().toISOString(); job.stderr = error.message; job.process.emit('close', 1); } });
+    const viaLauncher = process.platform === 'win32';
+    const launchFailure = (error: unknown): Error => {
+      const launchError = json<{ error?: string }>(join(directory, 'launcher.json'))?.error;
+      const message = `Failed to start ${cmd.agent} runner: ${launchError ?? (error as Error).message}`;
+      writeFileSync(join(directory, 'stderr.log'), `Process error: ${message}\n`, { flag: 'a', mode: 0o600 });
+      atomicJson(join(directory, 'exit.json'), { exitCode: 1, signal: null, endTime: new Date().toISOString(), timedOut: false, killed: false, error: message });
+      rmSync(join(directory, 'stdin.tmp'), { force: true }); rmSync(join(directory, 'launch.tmp'), { force: true });
+      return new Error(message);
+    };
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(process.execPath, [fileURLToPath(new URL(viaLauncher ? './job-launcher.js' : './job-runner.js', import.meta.url)), directory], {
+        cwd: fileURLToPath(new URL('../../', import.meta.url)), env: buildWorkerEnv(), detached: true, stdio: 'ignore', windowsHide: true });
+    } catch (error) { throw launchFailure(error); }
+    let pid = child.pid;
+    if (viaLauncher) {
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => { child.kill(); reject(new Error('Runner launcher timed out')); }, 5000);
+          child.once('error', error => { clearTimeout(timer); reject(error); });
+          child.once('close', code => { clearTimeout(timer); code === 0 ? resolve() : reject(new Error(`Runner launcher exited with code ${code}`)); });
+        });
+        const result = json<{ pid?: number; launcherPid?: number; error?: string }>(join(directory, 'launcher.json'));
+        if (!result || result.error || !Number.isSafeInteger(result.pid) || result.pid! <= 0 || result.launcherPid !== child.pid) {
+          throw new Error(result?.error ?? 'Runner launcher returned no valid runner PID');
+        }
+        pid = result.pid;
+      } catch (error) {
+        throw launchFailure(error);
+      }
+    } else {
+      child.on('error', error => { const job = this.jobs.get(jobId); if (job) { job.status = 'failed'; job.closed = true; job.endTime = new Date().toISOString(); job.stderr = error.message; job.process.emit('close', 1); } });
+    }
     child.unref();
-    if (!child.pid) { rmSync(directory, { recursive: true, force: true }); throw new Error(`Failed to start ${cmd.agent} runner`); }
-    const job = record({ ...metaBase, pid: child.pid, runner: { pid: child.pid, started: '', name: 'node' }, worker: null }, directory);
+    if (!pid) { rmSync(directory, { recursive: true, force: true }); throw new Error(`Failed to start ${cmd.agent} runner`); }
+    const job = record({ ...metaBase, pid, runner: { pid, started: '', name: 'node' }, worker: null }, directory);
     // 保留摘要與 runner PID，完全不含 prompt；meta 寫入失敗仍可觀察／回收。
     try { atomicJson(join(directory, 'bootstrap.json'), job.meta); }
     catch (error) { console.error('ai-cli jobs: bootstrap write failed:', error); }
     this.jobs.set(job.meta.jobId, job);
     this.owned.add(job.meta.jobId);
+    if (viaLauncher) {
+      try { atomicJson(join(directory, 'launcher.ready'), { pid }); }
+      catch (error) {
+        const failure = launchFailure(error); refreshJob(job); throw failure;
+      }
+    }
     return job;
   }
   refresh(): void { for (const job of this.jobs.values()) { try { refreshJob(job); } catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') this.jobs.delete(job.meta.jobId); else throw e; } } }

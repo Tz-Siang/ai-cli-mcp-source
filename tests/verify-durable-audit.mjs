@@ -155,7 +155,7 @@ await test('L3 Grok prompt is moved into job and GC removes it', async () => {
   const command = grokAgent.buildCommand({ cliPath: process.execPath, cwd: ROOT, prompt: 'secret', resolvedModel: 'grok-stub', reasoningEffort: 'medium' });
   const staging = command.temporaryPromptFile; command.args = ['-e', 'process.exit(0)', ...command.args]; // Node would reject vendor args; only a stub exit is needed.
   command.args = ['-e', 'process.exit(0)', '--', staging];
-  const job = store.start(command); await store.wait([job.pid], 15);
+  const job = await store.start(command); await store.wait([job.pid], 15);
   assert(!existsSync(staging)); assert.equal(readFileSync(join(job.directory, 'prompt.txt'), 'utf8'), 'secret'); store.collect(Date.now(), true); assert(!existsSync(job.directory)); assert.equal(store.owned.size, 0); store.dispose();
 });
 await test('L4 checks own server only and shares cached identities with GC', async () => {

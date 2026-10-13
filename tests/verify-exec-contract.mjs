@@ -327,7 +327,7 @@ const registry = await load('agents/registry.js');
       const output = join(temp, `process-${parentValue ?? 'unset'}.json`);
       process.env.AI_CLI_WORKER_ENV_OUTPUT = output;
       const service = new ProcessService({ cliPaths: { codex: stub, claude: stub, antigravity: stub } });
-      const run = service.startProcess({ model: 'gpt-6.1-sol', prompt: 'capture worker env', workFolder: ROOT });
+      const run = await service.startProcess({ model: 'gpt-6.1-sol', prompt: 'capture worker env', workFolder: ROOT });
       const [result] = await service.waitForProcesses([run.pid], 10);
       check(result.status === 'completed' && result.exitCode === 0, `${label} stub 成功結束`);
       assertEnv(label, output);

@@ -1,6 +1,6 @@
 /** Detached runner：worker 的父行程，fd 直寫 log，唯一一次落 meta 與 exit。 */
 import { spawn, execFile } from 'node:child_process';
-import { closeSync, openSync, readFileSync, rmSync, writeSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readFileSync, rmSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -25,13 +25,19 @@ export function verifiedTermination(worker: ProcessIdentity, lookup: IdentityLoo
     return active;
   };
 }
-interface RunnerOptions { lookup?: IdentityLookup; save?: typeof atomicJson; pause?: (ms: number) => Promise<void>; cleaner?: ReturnType<typeof createAnsiCleaner> }
+interface RunnerOptions { lookup?: IdentityLookup; save?: typeof atomicJson; pause?: (ms: number) => Promise<void>; cleaner?: ReturnType<typeof createAnsiCleaner>; waitForLauncher?: boolean; launcherWaitMs?: number }
 export async function runJob(directory: string, options: RunnerOptions = {}): Promise<void> {
+  if (!options.waitForLauncher) return execute(directory, options);
+  // launch.tmp 含指令參數與 prompt：等待期間保留給清理掃描判斷 serverPid，任何離開路徑都刪除。
+  try { return await execute(directory, options); }
+  finally { try { rmSync(join(directory, 'launch.tmp'), { force: true }); } catch (error) { console.error('ai-cli runner cleanup:', error); } }
+}
+async function execute(directory: string, options: RunnerOptions): Promise<void> {
   const lookup = options.lookup ?? lookupIdentities, save = options.save ?? atomicJson;
   const pause = options.pause ?? (ms => new Promise(resolve => setTimeout(resolve, ms)));
   const remove = (file: string) => { try { rmSync(join(directory, file), { force: true }); } catch (error) { console.error('ai-cli runner cleanup:', error); } };
   const spec: RunnerSpec = JSON.parse(readFileSync(join(directory, 'launch.tmp'), 'utf8'));
-  rmSync(join(directory, 'launch.tmp'), { force: true });
+  if (!options.waitForLauncher) rmSync(join(directory, 'launch.tmp'), { force: true });
   let ids = new Map<number, ProcessIdentity>();
   for (let attempt = 0; attempt < 3; attempt++) {
     if (attempt) await pause(250 * 2 ** (attempt - 1));
@@ -48,6 +54,19 @@ export async function runJob(directory: string, options: RunnerOptions = {}): Pr
   };
   let failureFd: number | undefined;
   const openFailureLog = () => failureFd ??= openSync(join(directory, 'stderr.log'), 'a', 0o600);
+  // 僅新 launcher 使用；舊 server 直接啟動 job-runner.js <dir> 不等待確認。
+  if (options.waitForLauncher) {
+    let activation: { pid?: number } | undefined, cancelled = false;
+    try {
+      const deadline = Date.now() + (options.launcherWaitMs ?? 10000);
+      while (!existsSync(join(directory, 'launcher.ready')) && !readJobExit(directory) && Date.now() < deadline) await pause(25);
+      cancelled = !!readJobExit(directory);
+      if (!cancelled) try { activation = JSON.parse(readFileSync(join(directory, 'launcher.ready'), 'utf8')); } catch { /* 缺失／損壞都明確失敗。 */ }
+    } catch (error) { console.error('ai-cli runner launcher wait:', error); }
+    remove('launcher.ready'); remove('launch.tmp');
+    if (cancelled) { remove('stdin.tmp'); return; }
+    if (activation?.pid !== process.pid) { fail('Runner launcher activation timed out or returned invalid PID; worker was not started'); if (failureFd !== undefined) closeSync(failureFd); return; }
+  }
   if (!runner.started) { fail('Cannot identify runner after 3 attempts; worker was not started'); if (failureFd !== undefined) closeSync(failureFd); return; }
   if (spec.pty && spec.stdin) { fail('PTY jobs do not support stdinPrompt'); if (failureFd !== undefined) closeSync(failureFd); return; }
   const stdout = openSync(join(directory, 'stdout.log'), 'a', 0o600);
@@ -75,7 +94,8 @@ export async function runJob(directory: string, options: RunnerOptions = {}): Pr
       child = { pid: ptyProc.pid, exitCode: null, signalCode: null, kill: () => { ptyProc.kill(); return true; } };
       ptyProc.onData((data: string) => {
         if (ended) return; // stdout 可能已關閉並被 exit.json 暫存檔重用。
-        try { const text = cleaner.push(data); if (text) { writeSync(stdout, text); ptyOutput = true; } }
+        // 清掉 ANSI 後還有文字才算輸出；ConPTY 的初始化控制碼不算，寫入失敗也不改變判定。
+        try { const text = cleaner.push(data); if (text) { ptyOutput = true; writeSync(stdout, text); } }
         catch (error) {
           if (!outputFailed) { outputFailed = true; reportPtyError('PTY stdout write failed', error); }
         }
@@ -85,7 +105,7 @@ export async function runJob(directory: string, options: RunnerOptions = {}): Pr
         ended = true;
         child.exitCode = exitCode;
         try {
-          try { const text = cleaner.flush(); if (text) writeSync(stdout, text); }
+          try { const text = cleaner.flush(); if (text) { ptyOutput = true; writeSync(stdout, text); } }
           catch (error) { reportPtyError('PTY stdout flush failed', error); }
           try {
             releaseExitedPty(ptyProc);
@@ -201,4 +221,4 @@ export async function runJob(directory: string, options: RunnerOptions = {}): Pr
   for (const file of ['stdin.tmp', 'kill.json']) rmSync(join(directory, file), { force: true });
 }
 // 僅 runner 入口執行；其他模組不 import 本檔。
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) runJob(process.argv[2]).catch(error => { console.error(error); process.exitCode = 1; });
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) runJob(process.argv[2], { waitForLauncher: process.argv[3] === '--wait-launcher' }).catch(error => { console.error(error); process.exitCode = 1; });
