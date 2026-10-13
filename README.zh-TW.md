@@ -10,45 +10,6 @@
 以及**任何第三方 OpenAI-compatible API**（透過 direct-api，自己接）包成 MCP 工具，支援背景 job。這是**從原始碼自行維護**的版本，採用 registry-based
 架構，新增 AI agent 只需新增一個檔案。
 
-## Grok CLI
-
-Grok 是供程式碼／文字工作使用的獨立 xAI CLI 後端，使用 CLI 自己的登入。
-模型候選為 `grok-4.7`、`grok-4.7-build-fast`、`grok-4.6`、`grok-4.5`；
-`models` 工具與 `ai-cli models` 以 `grok models` 探查，15 秒逾時，失敗／未登入時
-保留成功快取或標示 `builtin-fallback`，不把靜態清單冒充 vendor 回覆。
-`GROK_CLI_NAME` 可覆寫指令或絕對路徑；預設先找 PATH，再退回
-`~/.grok/bin/grok.exe`（Windows）或 `~/.grok/bin/grok`。doctor 會列出 grok。
-
-長 prompt 走 UTF-8 `--prompt-file`，Windows native executable 不經 cmd.exe。
-`--rules` 每次送出共用 `WORKER_CONTEXT`，接著空一行附上 `run.system_prompt`；
-resume 也會重新補鎖，以 `--resume <session_id>` 續接，不使用 `--system-prompt-override`。
-一律帶 `--no-subagents`，一般模式加 `--always-approve`。
-`reasoning_effort` 支援 `low/medium/high/xhigh`，已實測（grok 1.0.50）。
-
-唯讀 `capabilities: ["fs/read", "analysis/produce"]` 送
-`--tools Read,Glob,Grep`、`--disallowed-tools` 寫入／shell／派工／動態工具拒絕清單
-（含 Grok 原生 MCP bridge `search_tool,use_tool`）、
-`--disable-web-search` 與 `--permission-mode dontAsk`，不帶 `--always-approve`。
-空 capabilities／只有 analysis/produce 時，因未確認 CLI 零工具模式的語意而直接拒絕；
-未知能力也直接拒絕。原生 MCP 拒絕名稱已在 grok 1.0.50 實測；實機仍須驗證
-shell／寫檔不能繞過；若該 CLI 版本無法強制限制，須把 builder 改成拒絕
-該版本後才可使用唯讀模式。stub 全綠只證明組裝契約，不能代替 vendor 行為驗證。
-
-Grok result 的 `subtype: error_during_execution` 或 `stop_reason: cancelled`
-即使 exit 0 也判 failed；錯誤訊息帶出這兩個欄位。
-
-Grok 的 MCP／CLI job 使用既有 JobStore／runner，可接回且適用結束後 30 分鐘回收。
-Messages NDJSON 的 result 會正規化 input/output/cache tokens 與 `cost_usd_nominal`
-（vendor 名目美元估值，不是帳單）；完整解析（verbose）的原始 usage 保存在 `raw_usage`。
-
-**F2 實機驗證點：** Grok 子行程已帶 `AI_CLI_WORKER=1`，但 Grok 會讀 Claude 的 MCP
-設定，必須確認它啟動的 ai-cli MCP server 也收到這個環境變數。由主導者執行
-`npm run verify:worker-identity -- --family grok`，探針期望 `A=沒有、B=有`，T6 正常產出
-通過自測的 add.py、worker 峰值 ≤ 1；若嘗試再派工，須看到
-`AI_CLI_NESTED_DISPATCH_BLOCKED:` 而且不產生第二個 worker。
-Grok 1.0.50 實測未收到 Claude SessionStart 身分 hook，因此此 agent 用 `--rules` 補鎖。
-真模型驗收由主導者執行，不加入 `npm test`。
-
 ## 快速開始
 
 **從 npm——不用編譯：**
@@ -74,6 +35,228 @@ claude mcp add ai-cli -s user -- node "$PWD/dist/server.js"
 的 clone（見下方「自動更新」），所以 **npm／npx 安裝拿不到自動更新**——換版本要自己
 來。想確定跑的是哪一版，就在指令裡把版本釘住（`@tkflyc/ai-cli-mcp@<版本>`）。
 `doctor` 回傳的 `update.supported` 表示這份安裝是否符合原始碼更新的前置條件。
+
+## 掛到 Claude Code
+
+最快的方式（在 repo 根目錄執行，`$PWD` 會自動展開成本機的絕對路徑）：
+
+```bash
+# bash / git bash
+claude mcp add ai-cli -s user -- node "$PWD/dist/server.js"
+```
+
+```powershell
+# PowerShell
+claude mcp add ai-cli -s user -- node "$PWD\dist\server.js"
+```
+
+或手動把 `~/.claude.json` 的 `mcpServers.ai-cli` 指向（`<repo>` 換成你 clone 的絕對路徑）：
+
+```json
+{
+  "type": "stdio",
+  "command": "node",
+  "args": ["<repo>/dist/server.js"],
+  "env": {}
+}
+```
+
+### 三個入口是等價的
+
+`dist/server.js`（官方推薦）、`dist/bin/ai-cli-mcp.js`、`node dist/bin/ai-cli.js mcp`
+三者對外行為完全相同，`verify-mcp.mjs` 每次都會三個都測過。
+
+> **4.1.2 之前 `ai-cli mcp` 是壞的**：`runMcpServer()` 在 transport 一接上就 resolve，
+> 而 `bin/ai-cli.js` 會在那之後呼叫 `process.exit()`，於是 server 在 handshake 完成前
+> 就自殺，client 只看得到 `MCP error -32000: Connection closed`。另外兩個入口沒有
+> `process.exit`，所以只是碰巧沒事。若你的設定還指著 `ai-cli.js mcp` 且版本低於
+> 4.1.2，升級或改指 `dist/server.js` 皆可。
+
+## 各 agent
+
+以下是各個後端的使用說明；維護者的驗收流程見 [tools/acceptance/README.md](tools/acceptance/README.md)。
+
+### Grok CLI
+
+Grok 是供程式碼／文字工作使用的獨立 xAI CLI 後端，使用 CLI 自己的登入。
+模型候選為 `grok-4.7`、`grok-4.7-build-fast`、`grok-4.6`、`grok-4.5`；
+`models` 工具與 `ai-cli models` 以 `grok models` 探查，15 秒逾時，失敗／未登入時
+保留成功快取或標示 `builtin-fallback`，不把靜態清單冒充 vendor 回覆。
+`GROK_CLI_NAME` 可覆寫指令或絕對路徑；預設先找 PATH，再退回
+`~/.grok/bin/grok.exe`（Windows）或 `~/.grok/bin/grok`。doctor 會列出 grok。
+
+長 prompt 走 UTF-8 `--prompt-file`，Windows native executable 不經 cmd.exe。
+`--rules` 每次送出共用 `WORKER_CONTEXT`，接著空一行附上 `run.system_prompt`；
+resume 也會重新補鎖，以 `--resume <session_id>` 續接，不使用 `--system-prompt-override`。
+一律帶 `--no-subagents`，一般模式加 `--always-approve`。
+`reasoning_effort` 支援 `low/medium/high/xhigh`，已實測（grok 1.0.50）。
+
+Grok result 的 `subtype: error_during_execution` 或 `stop_reason: cancelled`
+即使 exit 0 也判 failed；錯誤訊息帶出這兩個欄位。
+
+Grok 的 MCP／CLI job 使用既有 JobStore／runner，可接回且適用結束後 30 分鐘回收。
+Messages NDJSON 的 result 會正規化 input/output/cache tokens 與 `cost_usd_nominal`
+（vendor 名目美元估值，不是帳單）；完整解析（verbose）的原始 usage 保存在 `raw_usage`。
+
+唯讀 `capabilities` 的旗標組成與實機驗證、F2 實機驗證點屬於維護者驗收流程，見 [tools/acceptance/README.md](tools/acceptance/README.md)。空 capabilities 與未知能力會被直接拒絕。
+
+### direct-api：自己接任何第三方 API
+
+除了三個本機 CLI，這個框架還有一條 **direct-api** 路徑——它不啟動任何子程序，
+直接在 Node 行程內打 HTTP，因此**任何 OpenAI-compatible 的 `/chat/completions` 端點都能接**：
+OpenRouter、阿里雲 DashScope、NVIDIA 的 NIM 目錄、DeepSeek、Groq、together.ai、
+自架的 vLLM / Ollama，或你公司內部的 gateway。想加一家新的供應商**不需要改任何程式碼**。
+
+它不是單次補全的薄包裝：跑的是完整 agent loop，模型拿得到 `read_file` / `write_file` /
+`bash`，可以真的改檔案、跑指令。
+
+⚠️ **CLI 這條路有一個例外**：`ai-cli run` 派 direct-api 時不啟動子程序，也就沒有東西可以
+detach——指令會**等到請求結束才返回**，回的是終局狀態而不是可輪詢的 pid。所以下方
+「等待端怎麼知道 AI 還活著」教的 wait／peek 輪詢模式，在 CLI ＋ direct-api 這個組合上用不到。
+MCP 的 `run` 不受影響，direct-api 一樣立刻回 pid。
+
+#### 設定檔
+
+路徑 `~/.local/share/ai-cli/providers.json`（可用 `AI_CLI_PROVIDERS_PATH` 覆寫）：
+
+```json
+{
+  "providers": {
+    "openrouter": { "api_key": "sk-or-v1-..." },
+    "local":      { "base_url": "http://127.0.0.1:11434/v1", "api_key": "ollama" },
+    "nv": {
+      "base_url": "https://integrate.api.nvidia.com/v1",
+      "api_key": "nvapi-...",
+      "retry": { "max_retries": 3, "initial_delay_ms": 1000 },
+      "extra_body": { "max_tokens": 8192 },
+      "model_extra_body": {
+        "nvidia/nemotron-3.5-lightning-30b-a3b": { "reasoning_effort": "none" }
+      }
+    }
+  }
+}
+```
+
+- `api_key` 也接受寫成 `key` 或 `token`；`base_url` 也接受 `baseURL`。
+- `openrouter` 與 `dashscope` 有**內建預設端點與簡寫前綴**（`or`、`ds`），`base_url` 可省略。
+  其他自訂名稱都必須自己給 `base_url`。
+- provider key 建議取短名：叫 `nvidia` 會變成 `nvidia-nvidia/llama-...`，能動但很醜。
+
+> ⚠️ **這個檔是整份 fail-closed。** 任何一筆 provider 缺 `base_url` 或 `api_key`，
+> 整個檔案 throw，**其他原本正常的 provider 會一起壞掉**。動之前先備份。
+
+#### 怎麼呼叫
+
+model 名稱用 **`<provider>-<model>`**，前綴就是 `providers.json` 裡的那個 key：
+
+| model 參數 | 實際打到哪 |
+|-----------|-----------|
+| `or-qwen/qwen3.7-plus` | OpenRouter（`or` 是 `openrouter` 的內建簡寫） |
+| `nv-openai/gpt-oss-20b` | 上面自訂的 `nv`（NVIDIA NIM） |
+| `local-llama3.1` | 上面自訂的 `local`（Ollama） |
+
+前綴之後整串原樣送出，所以 model 名稱裡的斜線沒問題。**框架不維護任何白名單**。
+
+#### extra_body：控制框架不會替你送的欄位
+
+送出去的 request body 只有 `model` / `messages` / `stream` / `stream_options` / `tools`，
+所以託管模型的預設值原封不動生效——而那些預設值可能很貴。實測
+`nvidia/nemotron-3.5-lightning-30b-a3b`：走預設每輪 **28.0 秒／318 output token**，
+傳 `reasoning_effort: "none"` 只要 **6.1 秒／84 token**。
+
+`extra_body` 是 provider 層預設，`model_extra_body` **逐欄覆蓋**它，
+key 是送給 provider 的完整 model 名（前綴之後那串）。
+
+`model` / `messages` / `stream` / `stream_options` / `tools` 是**保留欄位**，
+兩層都不准設，**載入時就丟錯並點名是哪個 provider 的哪個欄位**——不是靜默丟棄。
+覆蓋 `stream` 會讓 SSE 解析器收到一整包 JSON；覆蓋 `tools` 會讓模型收到
+`executeTool` 執行不了的工具。
+
+> **注意術語衝突**：`run` 工具的 `reasoning_effort` 參數是 claude/codex 的 CLI 旗標，
+> 對 direct-api 仍然無效。`extra_body` 送的是**同名的 API 欄位**，兩者不是同一件事。
+
+#### retry：讓共享端點跑得完
+
+免費的共享端點在尖峰會限流與卸載。NVIDIA 自己的故障排除文件就寫明 hosted Nemotron
+endpoint 在高需求時會回 **429 或 503**，並建議「短暫等待後重試、降低並發」——
+而這個框架原本收到任何非 200 就直接讓整個 job 失敗。
+
+現在 429 與 5xx 走**指數退避加抖動**重試，其餘 4xx 不重試：服務端說格式錯的請求，
+再送一次還是錯，只是白等又燒額度。抖動是為了避免並行 job 一起退避、一起回來，
+把剛恢復的服務再打掛一次。
+
+- 預設 2 次、首次退避 1 秒；`max_retries: 0` 明確關閉。
+- 服務端有送 `Retry-After` 就聽它的（上限 60 秒）。
+- 退避途中被 kill 會**立刻醒來**，不會等睡完。
+- 每次重試發一個 `retry` 事件到 stdout——靜默重試會讓「很慢」跟「卡住」長得一模一樣，
+  而呼叫端只看得到工具回傳。
+
+**範圍限制**：重試只包住「建立請求」那一段。一旦回 200 開始讀串流，內容已經送到呼叫端，
+中途失敗**不重試**——重來會讓同一段回答出現兩次。
+
+實測 `nvidia/nemotron-3-super-120b-a12b`，每列 10 輪完整兩輪工具迴圈：
+
+| 請求速率 | 重試 | 成功率 |
+|---|---|---|
+| 背靠背連發（約 66 RPM） | 關 | 4/10 |
+| 10 RPM | 關 | 8/10 |
+| 15 RPM | 關 | 9/10 |
+| **15 RPM** | **開** | **10/10** |
+
+**放慢速率到不了 100%，重試才到**，而且速率還更快。均勻放慢是拿所有請求的時間去換
+少數請求的成功率；退避重試只在服務端真的拒絕時才付出等待。
+
+#### replay_reasoning：把上一輪的推理回送
+
+有些模型要求上一輪的 assistant message **完整**回送，包含它自己的推理內容。
+Kimi-K3 的 model card 原句是 “clients must pass back the complete assistant message,
+including `reasoning_content` and `tool_calls`”；DeepSeek V4 更硬——帶 `tools` 時
+少送會直接 **400**。
+
+```json
+"nv": { "replay_reasoning": ["moonshotai/kimi-k3"] }
+```
+
+`true` 代表這個 provider 的所有 model 都送，陣列則只送列出的那幾個。
+
+> **預設關閉，而且刻意不做內建的 model 白名單。**
+> `reasoning_content` 不在 OpenAI 的 assistant message schema 裡，而「OpenAI-compatible」
+> 不保證未知欄位會被忽略——Azure AI Model Inference 的 `extra-parameters` 預設就是 `error`。
+> 至於為什麼不寫死一份清單：這個專案的每一份硬編 model 清單最後都過期了
+> （codex 的靜態清單裡還躺著三個帳號用不了的 model），再加一份只是換個地方犯同一個錯。
+
+兩個實作細節：
+
+- 回送的是**這一輪**的推理（`turn.reasoningText`），不是整次 run 的累積值。用後者的話
+  第二輪會把第一輪的推理再附一次，越滾越長。
+- **每一個 assistant turn 都保存**，不是只有帶 `tool_calls` 的那些。最後一輪沒有工具呼叫的
+  回覆會寫進 session 檔，下次用同一個 `session_id` 續聊時它就是歷史 assistant turn。
+
+**實測的但書**：Kimi-K3 在**不回送**的情況下也能正確走完三輪工具鏈，而官方文件
+沒有寫少送會怎樣。所以這是照契約做，不是修一個看得見的當機。
+
+#### 這台機器接得到什麼
+
+`models` 的回傳有一個 `directApiProviders`：每個已設定 provider 的可用前綴
+（含內建簡寫）、`base_url`、`model_extra_body` 裡點名過的 model，
+以及一個可以直接複製去派工的 `example`。
+
+沒有它的話，工具回傳**答不出「這台機器接得到什麼」**——靜態的 `direct-api` 陣列
+只有四個佔位字串，而已設定的 provider 是本機狀態，不在版控也不在任何靜態清單裡。
+
+這個區塊**永遠不含 `api_key`**，而且**永遠不丟錯**：`providers.json` 讀不到時回 `note`，
+因為「讀不到」與「沒設定」對呼叫端是兩件不同的事。
+
+#### 能做什麼、限制在哪
+
+- **session**：`session_id` 存在 `workFolder/.tmp/api_sessions`，可以續聊。
+- **圖片**：prompt 裡寫 `[image:C:/path/to.png]`（png/jpg/webp/gif）。
+- **關掉工具**：prompt 開頭加 `[no-tools]`，退化成單純問答。
+- **每回合上限**：最多 30 次 API 呼叫、30 圈 tool loop。
+- **金鑰保護**：錯誤訊息回傳前把 api_key 換成 `[redacted]`。
+
+> 從 OpenCode 遷移：若 `providers.json` 不存在但 `~/.local/share/opencode/auth.json` 在，
+> 框架會自動轉檔一次。
 
 ## 自動更新
 
@@ -263,165 +446,6 @@ agent 的 `discoverModels` 現在必須回 Promise、有逾時且永不 reject�
 `vendor-cli-cached` 的 note 顯示「快取值：N 秒前問過 CLI；背景重新查詢中」，
 最近一次背景失敗時附原因。沒有有效快取時才回 `builtin-fallback` 並說明原因。
 `clearCatalogCache()` 只清記憶體，測試可用 `clearCatalogCache({ disk: true })` 一併刪磁碟檔。
-
-## direct-api：自己接任何第三方 API
-
-除了三個本機 CLI，這個框架還有一條 **direct-api** 路徑——它不啟動任何子程序，
-直接在 Node 行程內打 HTTP，因此**任何 OpenAI-compatible 的 `/chat/completions` 端點都能接**：
-OpenRouter、阿里雲 DashScope、NVIDIA 的 NIM 目錄、DeepSeek、Groq、together.ai、
-自架的 vLLM / Ollama，或你公司內部的 gateway。想加一家新的供應商**不需要改任何程式碼**。
-
-它不是單次補全的薄包裝：跑的是完整 agent loop，模型拿得到 `read_file` / `write_file` /
-`bash`，可以真的改檔案、跑指令。
-
-⚠️ **CLI 這條路有一個例外**：`ai-cli run` 派 direct-api 時不啟動子程序，也就沒有東西可以
-detach——指令會**等到請求結束才返回**，回的是終局狀態而不是可輪詢的 pid。所以下方
-「等待端怎麼知道 AI 還活著」教的 wait／peek 輪詢模式，在 CLI ＋ direct-api 這個組合上用不到。
-MCP 的 `run` 不受影響，direct-api 一樣立刻回 pid。
-
-### 設定檔
-
-路徑 `~/.local/share/ai-cli/providers.json`（可用 `AI_CLI_PROVIDERS_PATH` 覆寫）：
-
-```json
-{
-  "providers": {
-    "openrouter": { "api_key": "sk-or-v1-..." },
-    "local":      { "base_url": "http://127.0.0.1:11434/v1", "api_key": "ollama" },
-    "nv": {
-      "base_url": "https://integrate.api.nvidia.com/v1",
-      "api_key": "nvapi-...",
-      "retry": { "max_retries": 3, "initial_delay_ms": 1000 },
-      "extra_body": { "max_tokens": 8192 },
-      "model_extra_body": {
-        "nvidia/nemotron-3.5-lightning-30b-a3b": { "reasoning_effort": "none" }
-      }
-    }
-  }
-}
-```
-
-- `api_key` 也接受寫成 `key` 或 `token`；`base_url` 也接受 `baseURL`。
-- `openrouter` 與 `dashscope` 有**內建預設端點與簡寫前綴**（`or`、`ds`），`base_url` 可省略。
-  其他自訂名稱都必須自己給 `base_url`。
-- provider key 建議取短名：叫 `nvidia` 會變成 `nvidia-nvidia/llama-...`，能動但很醜。
-
-> ⚠️ **這個檔是整份 fail-closed。** 任何一筆 provider 缺 `base_url` 或 `api_key`，
-> 整個檔案 throw，**其他原本正常的 provider 會一起壞掉**。動之前先備份。
-
-### 怎麼呼叫
-
-model 名稱用 **`<provider>-<model>`**，前綴就是 `providers.json` 裡的那個 key：
-
-| model 參數 | 實際打到哪 |
-|-----------|-----------|
-| `or-qwen/qwen3.7-plus` | OpenRouter（`or` 是 `openrouter` 的內建簡寫） |
-| `nv-openai/gpt-oss-20b` | 上面自訂的 `nv`（NVIDIA NIM） |
-| `local-llama3.1` | 上面自訂的 `local`（Ollama） |
-
-前綴之後整串原樣送出，所以 model 名稱裡的斜線沒問題。**框架不維護任何白名單**。
-
-### extra_body：控制框架不會替你送的欄位
-
-送出去的 request body 只有 `model` / `messages` / `stream` / `stream_options` / `tools`，
-所以託管模型的預設值原封不動生效——而那些預設值可能很貴。實測
-`nvidia/nemotron-3.5-lightning-30b-a3b`：走預設每輪 **28.0 秒／318 output token**，
-傳 `reasoning_effort: "none"` 只要 **6.1 秒／84 token**。
-
-`extra_body` 是 provider 層預設，`model_extra_body` **逐欄覆蓋**它，
-key 是送給 provider 的完整 model 名（前綴之後那串）。
-
-`model` / `messages` / `stream` / `stream_options` / `tools` 是**保留欄位**，
-兩層都不准設，**載入時就丟錯並點名是哪個 provider 的哪個欄位**——不是靜默丟棄。
-覆蓋 `stream` 會讓 SSE 解析器收到一整包 JSON；覆蓋 `tools` 會讓模型收到
-`executeTool` 執行不了的工具。
-
-> **注意術語衝突**：`run` 工具的 `reasoning_effort` 參數是 claude/codex 的 CLI 旗標，
-> 對 direct-api 仍然無效。`extra_body` 送的是**同名的 API 欄位**，兩者不是同一件事。
-
-### retry：讓共享端點跑得完
-
-免費的共享端點在尖峰會限流與卸載。NVIDIA 自己的故障排除文件就寫明 hosted Nemotron
-endpoint 在高需求時會回 **429 或 503**，並建議「短暫等待後重試、降低並發」——
-而這個框架原本收到任何非 200 就直接讓整個 job 失敗。
-
-現在 429 與 5xx 走**指數退避加抖動**重試，其餘 4xx 不重試：服務端說格式錯的請求，
-再送一次還是錯，只是白等又燒額度。抖動是為了避免並行 job 一起退避、一起回來，
-把剛恢復的服務再打掛一次。
-
-- 預設 2 次、首次退避 1 秒；`max_retries: 0` 明確關閉。
-- 服務端有送 `Retry-After` 就聽它的（上限 60 秒）。
-- 退避途中被 kill 會**立刻醒來**，不會等睡完。
-- 每次重試發一個 `retry` 事件到 stdout——靜默重試會讓「很慢」跟「卡住」長得一模一樣，
-  而呼叫端只看得到工具回傳。
-
-**範圍限制**：重試只包住「建立請求」那一段。一旦回 200 開始讀串流，內容已經送到呼叫端，
-中途失敗**不重試**——重來會讓同一段回答出現兩次。
-
-實測 `nvidia/nemotron-3-super-120b-a12b`，每列 10 輪完整兩輪工具迴圈：
-
-| 請求速率 | 重試 | 成功率 |
-|---|---|---|
-| 背靠背連發（約 66 RPM） | 關 | 4/10 |
-| 10 RPM | 關 | 8/10 |
-| 15 RPM | 關 | 9/10 |
-| **15 RPM** | **開** | **10/10** |
-
-**放慢速率到不了 100%，重試才到**，而且速率還更快。均勻放慢是拿所有請求的時間去換
-少數請求的成功率；退避重試只在服務端真的拒絕時才付出等待。
-
-
-### replay_reasoning：把上一輪的推理回送
-
-有些模型要求上一輪的 assistant message **完整**回送，包含它自己的推理內容。
-Kimi-K3 的 model card 原句是 “clients must pass back the complete assistant message,
-including `reasoning_content` and `tool_calls`”；DeepSeek V4 更硬——帶 `tools` 時
-少送會直接 **400**。
-
-```json
-"nv": { "replay_reasoning": ["moonshotai/kimi-k3"] }
-```
-
-`true` 代表這個 provider 的所有 model 都送，陣列則只送列出的那幾個。
-
-> **預設關閉，而且刻意不做內建的 model 白名單。**
-> `reasoning_content` 不在 OpenAI 的 assistant message schema 裡，而「OpenAI-compatible」
-> 不保證未知欄位會被忽略——Azure AI Model Inference 的 `extra-parameters` 預設就是 `error`。
-> 至於為什麼不寫死一份清單：這個專案的每一份硬編 model 清單最後都過期了
-> （codex 的靜態清單裡還躺著三個帳號用不了的 model），再加一份只是換個地方犯同一個錯。
-
-兩個實作細節：
-
-- 回送的是**這一輪**的推理（`turn.reasoningText`），不是整次 run 的累積值。用後者的話
-  第二輪會把第一輪的推理再附一次，越滾越長。
-- **每一個 assistant turn 都保存**，不是只有帶 `tool_calls` 的那些。最後一輪沒有工具呼叫的
-  回覆會寫進 session 檔，下次用同一個 `session_id` 續聊時它就是歷史 assistant turn。
-
-**實測的但書**：Kimi-K3 在**不回送**的情況下也能正確走完三輪工具鏈，而官方文件
-沒有寫少送會怎樣。所以這是照契約做，不是修一個看得見的當機。
-
-### 這台機器接得到什麼
-
-`models` 的回傳有一個 `directApiProviders`：每個已設定 provider 的可用前綴
-（含內建簡寫）、`base_url`、`model_extra_body` 裡點名過的 model，
-以及一個可以直接複製去派工的 `example`。
-
-沒有它的話，工具回傳**答不出「這台機器接得到什麼」**——靜態的 `direct-api` 陣列
-只有四個佔位字串，而已設定的 provider 是本機狀態，不在版控也不在任何靜態清單裡。
-
-這個區塊**永遠不含 `api_key`**，而且**永遠不丟錯**：`providers.json` 讀不到時回 `note`，
-因為「讀不到」與「沒設定」對呼叫端是兩件不同的事。
-
-### 能做什麼、限制在哪
-
-- **session**：`session_id` 存在 `workFolder/.tmp/api_sessions`，可以續聊。
-- **圖片**：prompt 裡寫 `[image:C:/path/to.png]`（png/jpg/webp/gif）。
-- **關掉工具**：prompt 開頭加 `[no-tools]`，退化成單純問答。
-- **每回合上限**：最多 30 次 API 呼叫、30 圈 tool loop。
-- **金鑰保護**：錯誤訊息回傳前把 api_key 換成 `[redacted]`。
-
-> 從 OpenCode 遷移：若 `providers.json` 不存在但 `~/.local/share/opencode/auth.json` 在，
-> 框架會自動轉檔一次。
 
 ## 使用者設定檔（config.json）
 
@@ -685,6 +709,17 @@ macOS 用 `ps` 查身分；拿不到身分資料時不得據此接回或殺行�
 舊 CLI job 的 PID 仍在但建立時間無法查證時，沿用 running 並附
 `identityVerified: false`，表格派工端標示 `[unverified]`；此舊版退化行為無法排除 PID 重用。
 
+### 接回驗收與監看修正
+
+持久化 job 以 UUID `jobId` 為主鍵；OS 重用 PID 時仍保留全部未過期 job。
+以 PID 呼叫 wait/result/peek/kill 時選最新 job，回傳包含 `jobId`。
+MCP `get_result` 可同時給 `pid` 與 `jobId`，讀取較舊的保留結果。
+TTY `jobs --watch` 使用替代畫面，離開時還原游標與畫面；非 TTY／JSON 仍逐次輸出。
+
+`query_usage` 啟動 Codex 時帶 `-c check_for_update_on_startup=false`，
+拿掉 `--no-daemon` 的退路也保留這個設定。Codex／Claude 出現更新提示時，
+自動按鍵即停止並回錯誤；不修改使用者的全域設定。
+
 ## Claude Code 派工面板（選用外掛）
 
 `ai-cli-jobs` 外掛會在輸入框上方顯示 job 列表，並在下方提示行顯示一行摘要。
@@ -795,42 +830,6 @@ gpt-6-astra medium 回一個字約 **5.7 秒**，gpt-5.4-mini low 約 **6.5 秒*
 觸發後進入冷卻（`AI_CLI_BREAKER_COOLDOWN_SEC`），期間擋下所有啟動並回傳清楚錯誤，冷卻結束自動恢復。
 所有門檻見上方環境變數表；正常用量不會誤觸。驗證：`npm run build && node verify-breaker.mjs`。
 
-## 掛到 Claude Code
-
-最快的方式（在 repo 根目錄執行，`$PWD` 會自動展開成本機的絕對路徑）：
-
-```bash
-# bash / git bash
-claude mcp add ai-cli -s user -- node "$PWD/dist/server.js"
-```
-
-```powershell
-# PowerShell
-claude mcp add ai-cli -s user -- node "$PWD\dist\server.js"
-```
-
-或手動把 `~/.claude.json` 的 `mcpServers.ai-cli` 指向（`<repo>` 換成你 clone 的絕對路徑）：
-
-```json
-{
-  "type": "stdio",
-  "command": "node",
-  "args": ["<repo>/dist/server.js"],
-  "env": {}
-}
-```
-
-### 三個入口是等價的
-
-`dist/server.js`（官方推薦）、`dist/bin/ai-cli-mcp.js`、`node dist/bin/ai-cli.js mcp`
-三者對外行為完全相同，`verify-mcp.mjs` 每次都會三個都測過。
-
-> **4.1.2 之前 `ai-cli mcp` 是壞的**：`runMcpServer()` 在 transport 一接上就 resolve，
-> 而 `bin/ai-cli.js` 會在那之後呼叫 `process.exit()`，於是 server 在 handshake 完成前
-> 就自殺，client 只看得到 `MCP error -32000: Connection closed`。另外兩個入口沒有
-> `process.exit`，所以只是碰巧沒事。若你的設定還指著 `ai-cli.js mcp` 且版本低於
-> 4.1.2，升級或改指 `dist/server.js` 皆可。
-
 ## 與舊 dist 的差異
 
 - 移除了已壞掉的 gemini 殘留（舊 dist 的 cli-parse / app-cli 還 import 不存在的
@@ -874,18 +873,4 @@ Apache-2.0，見 [LICENSE](LICENSE)。
 本專案是衍生作品，原始程式最初以 MIT 授權釋出。原始的著作權聲明與保留的 MIT 條款在
 [NOTICE](NOTICE)，它隨每一份副本散布（已列入 `package.json` 的 `files`）。
 
-## 接回驗收與監看修正
-
-持久化 job 以 UUID `jobId` 為主鍵；OS 重用 PID 時仍保留全部未過期 job。
-以 PID 呼叫 wait/result/peek/kill 時選最新 job，回傳包含 `jobId`。
-MCP `get_result` 可同時給 `pid` 與 `jobId`，讀取較舊的保留結果。
-TTY `jobs --watch` 使用替代畫面，離開時還原游標與畫面；非 TTY／JSON 仍逐次輸出。
-
-`query_usage` 啟動 Codex 時帶 `-c check_for_update_on_startup=false`，
-拿掉 `--no-daemon` 的退路也保留這個設定。Codex／Claude 出現更新提示時，
-自動按鍵即停止並回錯誤；不修改使用者的全域設定。
-
-真模型接回驗收使用
-`npm run verify:restart-recovery -- --family claude,codex,grok` 或 `--models ...`。
-每家明確送 medium；報告檢查 recovered/running、完整結果、session、usage 與 UUID 數。
-此命令會消耗模型額度；詳見[驗收用法](tools/acceptance/README.md)。`npm test` 只用 stub。
+維護者驗收流程（Worker 身分、重啟接回、Grok 唯讀強制力）見 [tools/acceptance/README.md](tools/acceptance/README.md)。

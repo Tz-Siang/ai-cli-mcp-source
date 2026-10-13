@@ -14,51 +14,12 @@ Requires Node `^20.19.0 || >=22.12.0`.
 > The Chinese document is the exhaustive reference; this page covers the design and
 > the parts you need to get running.
 
-## Grok CLI
+## What it does
 
-Grok is a separate xAI CLI backend for coding and text work. Select `grok-4.7`,
-`grok-4.7-build-fast`, `grok-4.6`, or `grok-4.5`; `models` and `ai-cli models`
-query `grok models` with a 15-second timeout and retain successful cache values or
-label the builtin fallback on failure (including an unauthenticated CLI).
-`GROK_CLI_NAME` overrides the binary; otherwise PATH wins, with
-`~/.grok/bin/grok.exe` (Windows) or `~/.grok/bin/grok` as fallback. Doctor lists Grok.
-
-Prompts use `--prompt-file` to preserve long Windows prompts. Native Windows
-execution bypasses cmd.exe; `--rules` receives the shared `WORKER_CONTEXT` first,
-then an optional `run.system_prompt`, separated by a blank line. Every resume
-reinjects the lock with `--resume`; `--no-subagents` is always set. Normal mode
-uses `--always-approve`. `reasoning_effort` accepts only `low`, `medium`, `high`, `xhigh` (live verified: grok 1.0.50).
-
-Strict `capabilities: ["fs/read", "analysis/produce"]` uses
-`--tools Read,Glob,Grep`, a write/shell/delegation deny list including Grok native
-`search_tool,use_tool` (MCP bridges), `--disable-web-search`,
-and `--permission-mode dontAsk`, without `--always-approve`. Empty capabilities
-and `analysis/produce` alone are refused until the CLI's zero-tool semantics are
-confirmed; unsupported capabilities are also refused. The native MCP deny names
-were verified on Grok 1.0.50; live acceptance should recheck shell/write bypasses;
-if the installed CLI cannot enforce them, do not use strict mode until its builder
-is changed to reject that CLI. Stub tests verify the contract, not vendor enforcement.
-
-Grok results with `subtype: error_during_execution` or `stop_reason: cancelled`
-fail even with exit 0; the error includes both fields.
-
-Grok uses the same durable JobStore/runner, restart recovery and 30-minute finished
-job retention as Claude/Codex. Messages JSON result usage includes cache tokens in
-normalized input and exposes `cost_usd_nominal` (vendor estimate, not a billing statement).
-
-The Grok process receives `AI_CLI_WORKER=1`. **Live F2 verification:** Grok imports
-Claude's MCP configuration; confirm its inherited ai-cli MCP server also receives
-that environment and refuses `run` with `AI_CLI_NESTED_DISPATCH_BLOCKED:`. Run
-`npm run verify:worker-identity -- --family grok` from a leader session: the probe
-must report `A=沒有`, `B=有`; T6 must produce the tested add.py with worker peak ≤ 1.
-The tested Grok 1.0.50 did not receive the Claude SessionStart identity hook, which
-is why this backend supplies the lock through `--rules`. Real-model tests remain opt-in.
-
-## Antigravity model list
-
-Antigravity's top-level model list uses routable vendor results (including successful
-cached results) plus `agy` / `agy-default`. Without a usable result, its fallback is
-`agy`, `agy-default`, `gemini-3.1-pro-high`, and `gemini-3.8-flash-high`.
+Each supported CLI becomes a tool you can call from an MCP client. Jobs run in the
+background: `run` returns a PID immediately, and `list_processes`, `peek`, `wait` and
+`get_result` observe it while it works. Two surfaces expose this — the MCP server and
+the `ai-cli` command line — sharing durable state for Claude, Codex, Grok and Windows Antigravity.
 
 ## Quick start
 
@@ -89,12 +50,231 @@ which one is running.
 `doctor` reports whether this installation meets the source-update precondition
 in `update.supported`.
 
-## What it does
+## Wiring into Claude Code
 
-Each supported CLI becomes a tool you can call from an MCP client. Jobs run in the
-background: `run` returns a PID immediately, and `list_processes`, `peek`, `wait` and
-`get_result` observe it while it works. Two surfaces expose this — the MCP server and
-the `ai-cli` command line — sharing durable state for Claude, Codex, Grok and Windows Antigravity.
+```bash
+# bash / git bash
+claude mcp add ai-cli -s user -- node "$PWD/dist/server.js"
+```
+```powershell
+# PowerShell
+claude mcp add ai-cli -s user -- node "$PWD\dist\server.js"
+```
+
+## Agents
+
+Usage notes for each backend. Maintainer acceptance procedures are in [tools/acceptance/README.md](tools/acceptance/README.md).
+
+### Grok CLI
+
+Grok is a separate xAI CLI backend for coding and text work. Select `grok-4.7`,
+`grok-4.7-build-fast`, `grok-4.6`, or `grok-4.5`; `models` and `ai-cli models`
+query `grok models` with a 15-second timeout and retain successful cache values or
+label the builtin fallback on failure (including an unauthenticated CLI).
+`GROK_CLI_NAME` overrides the binary; otherwise PATH wins, with
+`~/.grok/bin/grok.exe` (Windows) or `~/.grok/bin/grok` as fallback. Doctor lists Grok.
+
+Prompts use `--prompt-file` to preserve long Windows prompts. Native Windows
+execution bypasses cmd.exe; `--rules` receives the shared `WORKER_CONTEXT` first,
+then an optional `run.system_prompt`, separated by a blank line. Every resume
+reinjects the lock with `--resume`; `--no-subagents` is always set. Normal mode
+uses `--always-approve`. `reasoning_effort` accepts only `low`, `medium`, `high`, `xhigh` (live verified: grok 1.0.50).
+
+Grok results with `subtype: error_during_execution` or `stop_reason: cancelled`
+fail even with exit 0; the error includes both fields.
+
+Grok uses the same durable JobStore/runner, restart recovery and 30-minute finished
+job retention as Claude/Codex. Messages JSON result usage includes cache tokens in
+normalized input and exposes `cost_usd_nominal` (vendor estimate, not a billing statement).
+
+The strict read-only `capabilities` flags, their live verification and the F2 live-verification checklist are maintainer acceptance steps; see [tools/acceptance/README.md](tools/acceptance/README.md). Empty and unsupported capabilities are refused.
+
+### Antigravity model list
+
+Antigravity's top-level model list uses routable vendor results (including successful
+cached results) plus `agy` / `agy-default`. Without a usable result, its fallback is
+`agy`, `agy-default`, `gemini-3.1-pro-high`, and `gemini-3.8-flash-high`.
+
+### direct-api
+
+Besides the three local CLIs there is a fourth path that starts no subprocess at all:
+`direct-api` talks HTTP from inside the Node process, so **any OpenAI-compatible
+`/chat/completions` endpoint works** — OpenRouter, DashScope, DeepSeek, NVIDIA's
+hosted NIM catalog, a local Ollama, your company gateway. Adding a provider needs no
+code change, only a config entry.
+
+It is not a thin completion wrapper: it runs the full agent loop, so the model gets
+`read_file` / `write_file` / `bash` and can actually change files and run commands.
+
+#### Configuring a provider
+
+`~/.local/share/ai-cli/providers.json` (override with `AI_CLI_PROVIDERS_PATH`):
+
+```json
+{
+  "providers": {
+    "openrouter": { "api_key": "sk-or-v1-..." },
+    "local":      { "base_url": "http://127.0.0.1:11434/v1", "api_key": "ollama" },
+    "nv": {
+      "base_url": "https://integrate.api.nvidia.com/v1",
+      "api_key": "nvapi-...",
+      "retry": { "max_retries": 3, "initial_delay_ms": 1000 },
+      "extra_body": { "max_tokens": 8192 },
+      "model_extra_body": {
+        "nvidia/nemotron-3.5-lightning-30b-a3b": { "reasoning_effort": "none" }
+      }
+    }
+  }
+}
+```
+
+Address a model as `<provider>-<model>`, where the prefix is the key above:
+`or-qwen/qwen3.7-plus`, `nv-openai/gpt-oss-20b`, `local-llama3.1`. Everything after
+the prefix is sent verbatim, so slashes in model names are fine. `openrouter` and
+`dashscope` have built-in base URLs and short prefixes (`or`, `ds`); every other key
+must supply its own `base_url`.
+
+> **This file is fail-closed as a whole.** One provider missing `base_url` or
+> `api_key` makes the entire file throw, taking the working providers down with it.
+> Back it up before editing.
+
+#### extra_body — controlling what the framework does not send
+
+The request body is `model` / `messages` / `stream` / `stream_options` / `tools` and
+nothing else, so a hosted model's defaults apply untouched — and those defaults can be
+expensive. `nvidia/nemotron-3.5-lightning-30b-a3b` spends 28.0s and 318 output tokens
+per tool round on its default reasoning, and 6.1s / 84 tokens with
+`reasoning_effort: "none"`.
+
+`extra_body` is the provider-wide default; `model_extra_body` overrides it field by
+field, keyed by the model name as sent to the provider.
+
+`model`, `messages`, `stream`, `stream_options` and `tools` are **rejected at load
+time**, naming the provider and the offending key — not dropped silently. Overriding
+`stream` would hand the SSE reader a single JSON blob; overriding `tools` would offer
+the model tools `executeTool` cannot run.
+
+Note the terminology clash: the `run` tool's `reasoning_effort` argument is a
+CLI flag for claude/codex and still does not apply here. What `extra_body` sends is
+the same-named *API field*, which is a different thing.
+
+#### retry — surviving a shared endpoint
+
+Free shared endpoints throttle and shed load. NVIDIA's own troubleshooting docs say
+the hosted Nemotron endpoints may return 429 or 503 under high demand, and advise a
+short wait plus lower concurrency; before this, any non-200 simply failed the job.
+
+429 and 5xx are retried with exponential backoff and jitter. Every other 4xx is not —
+a request the server rejected as malformed is still malformed the second time, and
+retrying only burns quota. Defaults are 2 retries and a 1s initial delay;
+`max_retries: 0` turns it off. A `Retry-After` header wins over the computed backoff,
+capped at 60s. A kill during backoff wakes immediately rather than sleeping it out.
+
+Each retry emits a `retry` event on stdout — a silent retry makes "slow" and "stuck"
+indistinguishable to a caller that only sees the tool result.
+
+Retrying covers **establishing** the request. Once a 200 arrives and the stream
+starts, content has already reached the caller, so a mid-stream failure is not
+retried; replaying it would emit the same answer twice.
+
+Measured on `nvidia/nemotron-3-super-120b-a12b`, 10 two-round tool loops per row:
+
+| Request pacing | Retry | Success |
+|---|---|---|
+| back-to-back (~66 rpm) | off | 4/10 |
+| 10 rpm | off | 8/10 |
+| 15 rpm | off | 9/10 |
+| **15 rpm** | **on** | **10/10** |
+
+Slowing down alone never reached 100%; retrying did, and at the faster rate. Even
+pacing trades every request's latency for a few requests' success, while backoff pays
+only when the server actually refuses.
+
+#### replay_reasoning — models that want their own thinking back
+
+Some models require the previous assistant turn to be replayed *complete*, including
+its reasoning. Kimi-K3's model card: "clients must pass back the complete assistant
+message, including `reasoning_content` and `tool_calls`". DeepSeek V4 goes further —
+with `tools` in play, omitting it returns **400**.
+
+```json
+"nv": { "replay_reasoning": ["moonshotai/kimi-k3"] }
+```
+
+`true` covers every model of that provider; an array names them individually.
+
+**Off by default, and deliberately not a built-in model list.** `reasoning_content`
+is not part of OpenAI's assistant message schema, and "OpenAI-compatible" does not
+promise unknown fields are ignored — Azure AI Model Inference defaults `extra-parameters`
+to `error`. A hardcoded allow-list would also go stale the way every other hardcoded
+model list here has.
+
+The replayed value is *that turn's* reasoning, not the run's accumulated text —
+otherwise each round would re-append everything before it. It applies to every
+assistant turn, not only the ones carrying tool calls: the final answer is written to
+the session file and becomes a prior turn when you continue with the same
+`session_id`.
+
+Measured caveat: Kimi-K3 completed a three-round tool chain correctly *without* the
+replay, and the docs do not state what omitting it breaks. This follows the stated
+contract; it is not a fix for an observed failure.
+
+#### Knowing what this machine can reach
+
+`models` returns a `directApiProviders` block: each configured provider's usable
+prefixes (including built-in shorthands), base URL, the models named in
+`model_extra_body`, and a copy-pasteable `example`.
+
+Without it a tool result cannot answer "what can this machine reach" — the static
+`direct-api` list is four placeholder strings, and configured providers are local
+state that lives in neither version control nor any static list.
+
+The block never contains `api_key`, and never throws: an unreadable `providers.json`
+comes back as a `note`, because "cannot read it" and "nothing configured" are
+different answers.
+
+#### Limits
+
+- **Sessions** — `session_id` persists under `workFolder/.tmp/api_sessions`.
+- **Images** — write `[image:C:/path/to.png]` in the prompt (png/jpg/webp/gif).
+- **Plain Q&A** — prefix the prompt with `[no-tools]` to drop the tool loop.
+- **Per turn** — at most 30 API calls and 30 tool-loop iterations.
+- **Keys** — error text is redacted to `[redacted]` before it is returned.
+- Model lists are dynamic; the framework keeps no allow-list.
+
+> Migrating from OpenCode: if `providers.json` is absent but
+> `~/.local/share/opencode/auth.json` exists, it is converted once, automatically.
+
+## Auto-update
+
+**Precondition: this section applies only to a source clone.** The updater requires
+`.git` and `package.json` in the repo root, so an npm/npx install never updates
+itself and `doctor` reports `update.supported: false`.
+
+All three MCP entry points (`dist/server.js`, `dist/bin/ai-cli-mcp.js`, and
+`dist/bin/ai-cli.js mcp`) serve normally after the transport connects, then check in the
+background ~3 seconds later and apply updates in a subprocess; the new version takes
+effect on the next start. Nothing blocks startup, and no running server or job is
+killed.
+
+| `AI_CLI_AUTO_UPDATE` | Behavior |
+|---|---|
+| `on` (default) | Check in the background, apply automatically |
+| `check` | Report a new version, do not apply |
+| `off` | Never touch the network; still reads existing state |
+
+Also honored: `AI_CLI_UPDATE_CHECK_INTERVAL_SEC` (default `3600`),
+`AI_CLI_UPDATE_BRANCH`, and `AI_CLI_STATE_DIR` (default `~/.local/state/ai-cli`).
+
+⚠️ **Treat a push to `master` as a deployment: `npm test` must be green before you
+push.** This is a public repo, and anyone with write access can trigger that.
+
+A source install that tracks `master` with auto-update on will try to fetch and apply
+it on a later check. It does not always land: a dirty tree, a different tracked
+branch (`AI_CLI_UPDATE_BRANCH`), a non-fast-forward or a held lock stops it before
+the pull, and a failed install, build or `doctor` smoke test triggers a rollback
+attempt — which can itself fail. So neither "it went everywhere" nor "it went
+nowhere" is safe to assume.
 
 ## Architecture
 
@@ -294,6 +474,18 @@ model response. Legacy CLI jobs with a live PID but unavailable creation identit
 remain running with `identityVerified: false` and `[unverified]` in the dispatcher
 column; this legacy fallback cannot rule out PID reuse.
 
+### Recovery acceptance and monitoring fixes
+
+Durable jobs are keyed by UUID `jobId`; reusing an OS PID keeps all retained jobs.
+PID-based wait/result/peek/kill selects the latest job and returns its `jobId`.
+Use MCP `get_result` with both `pid` and `jobId` to read an older retained result.
+TTY `jobs --watch` uses the alternate screen and restores the cursor/screen on exit;
+non-TTY and JSON watch output remains append-only.
+
+`query_usage` launches Codex with `-c check_for_update_on_startup=false`, including
+its fallback without `--no-daemon`. Codex and Claude update prompts stop automated
+keys and return an error. This does not alter the user's global configuration.
+
 ## Claude Code job panel（optional plugin）
 
 The `ai-cli-jobs` plugin shows a job list above the input box and a one-line
@@ -381,199 +573,6 @@ This matters because Codex and Claude emit nothing at all while reasoning. Witho
 Durable MCP/CLI jobs become `lost` when both tracked processes disappear without
 a completion record. The output remains available and the outcome is unknown.
 
-## Auto-update
-
-**Precondition: this section applies only to a source clone.** The updater requires
-`.git` and `package.json` in the repo root, so an npm/npx install never updates
-itself and `doctor` reports `update.supported: false`.
-
-All three MCP entry points (`dist/server.js`, `dist/bin/ai-cli-mcp.js`, and
-`dist/bin/ai-cli.js mcp`) serve normally after the transport connects, then check in the
-background ~3 seconds later and apply updates in a subprocess; the new version takes
-effect on the next start. Nothing blocks startup, and no running server or job is
-killed.
-
-| `AI_CLI_AUTO_UPDATE` | Behavior |
-|---|---|
-| `on` (default) | Check in the background, apply automatically |
-| `check` | Report a new version, do not apply |
-| `off` | Never touch the network; still reads existing state |
-
-Also honored: `AI_CLI_UPDATE_CHECK_INTERVAL_SEC` (default `3600`),
-`AI_CLI_UPDATE_BRANCH`, and `AI_CLI_STATE_DIR` (default `~/.local/state/ai-cli`).
-
-⚠️ **Treat a push to `master` as a deployment: `npm test` must be green before you
-push.** This is a public repo, and anyone with write access can trigger that.
-
-A source install that tracks `master` with auto-update on will try to fetch and apply
-it on a later check. It does not always land: a dirty tree, a different tracked
-branch (`AI_CLI_UPDATE_BRANCH`), a non-fast-forward or a held lock stops it before
-the pull, and a failed install, build or `doctor` smoke test triggers a rollback
-attempt — which can itself fail. So neither "it went everywhere" nor "it went
-nowhere" is safe to assume.
-
-## direct-api
-
-Besides the three local CLIs there is a fourth path that starts no subprocess at all:
-`direct-api` talks HTTP from inside the Node process, so **any OpenAI-compatible
-`/chat/completions` endpoint works** — OpenRouter, DashScope, DeepSeek, NVIDIA's
-hosted NIM catalog, a local Ollama, your company gateway. Adding a provider needs no
-code change, only a config entry.
-
-It is not a thin completion wrapper: it runs the full agent loop, so the model gets
-`read_file` / `write_file` / `bash` and can actually change files and run commands.
-
-### Configuring a provider
-
-`~/.local/share/ai-cli/providers.json` (override with `AI_CLI_PROVIDERS_PATH`):
-
-```json
-{
-  "providers": {
-    "openrouter": { "api_key": "sk-or-v1-..." },
-    "local":      { "base_url": "http://127.0.0.1:11434/v1", "api_key": "ollama" },
-    "nv": {
-      "base_url": "https://integrate.api.nvidia.com/v1",
-      "api_key": "nvapi-...",
-      "retry": { "max_retries": 3, "initial_delay_ms": 1000 },
-      "extra_body": { "max_tokens": 8192 },
-      "model_extra_body": {
-        "nvidia/nemotron-3.5-lightning-30b-a3b": { "reasoning_effort": "none" }
-      }
-    }
-  }
-}
-```
-
-Address a model as `<provider>-<model>`, where the prefix is the key above:
-`or-qwen/qwen3.7-plus`, `nv-openai/gpt-oss-20b`, `local-llama3.1`. Everything after
-the prefix is sent verbatim, so slashes in model names are fine. `openrouter` and
-`dashscope` have built-in base URLs and short prefixes (`or`, `ds`); every other key
-must supply its own `base_url`.
-
-> **This file is fail-closed as a whole.** One provider missing `base_url` or
-> `api_key` makes the entire file throw, taking the working providers down with it.
-> Back it up before editing.
-
-### extra_body — controlling what the framework does not send
-
-The request body is `model` / `messages` / `stream` / `stream_options` / `tools` and
-nothing else, so a hosted model's defaults apply untouched — and those defaults can be
-expensive. `nvidia/nemotron-3.5-lightning-30b-a3b` spends 28.0s and 318 output tokens
-per tool round on its default reasoning, and 6.1s / 84 tokens with
-`reasoning_effort: "none"`.
-
-`extra_body` is the provider-wide default; `model_extra_body` overrides it field by
-field, keyed by the model name as sent to the provider.
-
-`model`, `messages`, `stream`, `stream_options` and `tools` are **rejected at load
-time**, naming the provider and the offending key — not dropped silently. Overriding
-`stream` would hand the SSE reader a single JSON blob; overriding `tools` would offer
-the model tools `executeTool` cannot run.
-
-Note the terminology clash: the `run` tool's `reasoning_effort` argument is a
-CLI flag for claude/codex and still does not apply here. What `extra_body` sends is
-the same-named *API field*, which is a different thing.
-
-### retry — surviving a shared endpoint
-
-Free shared endpoints throttle and shed load. NVIDIA's own troubleshooting docs say
-the hosted Nemotron endpoints may return 429 or 503 under high demand, and advise a
-short wait plus lower concurrency; before this, any non-200 simply failed the job.
-
-429 and 5xx are retried with exponential backoff and jitter. Every other 4xx is not —
-a request the server rejected as malformed is still malformed the second time, and
-retrying only burns quota. Defaults are 2 retries and a 1s initial delay;
-`max_retries: 0` turns it off. A `Retry-After` header wins over the computed backoff,
-capped at 60s. A kill during backoff wakes immediately rather than sleeping it out.
-
-Each retry emits a `retry` event on stdout — a silent retry makes "slow" and "stuck"
-indistinguishable to a caller that only sees the tool result.
-
-Retrying covers **establishing** the request. Once a 200 arrives and the stream
-starts, content has already reached the caller, so a mid-stream failure is not
-retried; replaying it would emit the same answer twice.
-
-Measured on `nvidia/nemotron-3-super-120b-a12b`, 10 two-round tool loops per row:
-
-| Request pacing | Retry | Success |
-|---|---|---|
-| back-to-back (~66 rpm) | off | 4/10 |
-| 10 rpm | off | 8/10 |
-| 15 rpm | off | 9/10 |
-| **15 rpm** | **on** | **10/10** |
-
-Slowing down alone never reached 100%; retrying did, and at the faster rate. Even
-pacing trades every request's latency for a few requests' success, while backoff pays
-only when the server actually refuses.
-
-
-### replay_reasoning — models that want their own thinking back
-
-Some models require the previous assistant turn to be replayed *complete*, including
-its reasoning. Kimi-K3's model card: "clients must pass back the complete assistant
-message, including `reasoning_content` and `tool_calls`". DeepSeek V4 goes further —
-with `tools` in play, omitting it returns **400**.
-
-```json
-"nv": { "replay_reasoning": ["moonshotai/kimi-k3"] }
-```
-
-`true` covers every model of that provider; an array names them individually.
-
-**Off by default, and deliberately not a built-in model list.** `reasoning_content`
-is not part of OpenAI's assistant message schema, and "OpenAI-compatible" does not
-promise unknown fields are ignored — Azure AI Model Inference defaults `extra-parameters`
-to `error`. A hardcoded allow-list would also go stale the way every other hardcoded
-model list here has.
-
-The replayed value is *that turn's* reasoning, not the run's accumulated text —
-otherwise each round would re-append everything before it. It applies to every
-assistant turn, not only the ones carrying tool calls: the final answer is written to
-the session file and becomes a prior turn when you continue with the same
-`session_id`.
-
-Measured caveat: Kimi-K3 completed a three-round tool chain correctly *without* the
-replay, and the docs do not state what omitting it breaks. This follows the stated
-contract; it is not a fix for an observed failure.
-
-### Knowing what this machine can reach
-
-`models` returns a `directApiProviders` block: each configured provider's usable
-prefixes (including built-in shorthands), base URL, the models named in
-`model_extra_body`, and a copy-pasteable `example`.
-
-Without it a tool result cannot answer "what can this machine reach" — the static
-`direct-api` list is four placeholder strings, and configured providers are local
-state that lives in neither version control nor any static list.
-
-The block never contains `api_key`, and never throws: an unreadable `providers.json`
-comes back as a `note`, because "cannot read it" and "nothing configured" are
-different answers.
-
-### Limits
-
-- **Sessions** — `session_id` persists under `workFolder/.tmp/api_sessions`.
-- **Images** — write `[image:C:/path/to.png]` in the prompt (png/jpg/webp/gif).
-- **Plain Q&A** — prefix the prompt with `[no-tools]` to drop the tool loop.
-- **Per turn** — at most 30 API calls and 30 tool-loop iterations.
-- **Keys** — error text is redacted to `[redacted]` before it is returned.
-- Model lists are dynamic; the framework keeps no allow-list.
-
-> Migrating from OpenCode: if `providers.json` is absent but
-> `~/.local/share/opencode/auth.json` exists, it is converted once, automatically.
-
-## Wiring into Claude Code
-
-```bash
-# bash / git bash
-claude mcp add ai-cli -s user -- node "$PWD/dist/server.js"
-```
-```powershell
-# PowerShell
-claude mcp add ai-cli -s user -- node "$PWD\dist\server.js"
-```
-
 ## Relationship to the original project
 
 This project began as a clone of [mkXultra/ai-cli-mcp](https://github.com/mkXultra/ai-cli-mcp)
@@ -618,20 +617,4 @@ MIT License. The original copyright notices and the retained MIT terms are in
 [NOTICE](NOTICE), which ships with every copy — it is in the repo and
 listed in `package.json`'s `files`, so it travels with the npm package too.
 
-## Recovery acceptance and monitoring fixes
-
-Durable jobs are keyed by UUID `jobId`; reusing an OS PID keeps all retained jobs.
-PID-based wait/result/peek/kill selects the latest job and returns its `jobId`.
-Use MCP `get_result` with both `pid` and `jobId` to read an older retained result.
-TTY `jobs --watch` uses the alternate screen and restores the cursor/screen on exit;
-non-TTY and JSON watch output remains append-only.
-
-`query_usage` launches Codex with `-c check_for_update_on_startup=false`, including
-its fallback without `--no-daemon`. Codex and Claude update prompts stop automated
-keys and return an error. This does not alter the user's global configuration.
-
-Run the opt-in live recovery acceptance with
-`npm run verify:restart-recovery -- --family claude,codex,grok` or `--models ...`.
-Every family explicitly receives medium effort. Reports include recovered/running,
-completed output, session, usage and UUID counts. It consumes model quota;
-see [acceptance usage](tools/acceptance/README.md). `npm test` uses stubs only.
+Maintainer acceptance procedures (worker identity, restart recovery, Grok read-only enforcement) are in [tools/acceptance/README.md](tools/acceptance/README.md).

@@ -67,6 +67,10 @@
   提示改為「找不到 mcp__ai-cli__list_processes：ai-cli 未連線（用 /mcp 重連，server 名稱須為 ai-cli），或被 permissions.deny 擋下」。
   同一次實測也確認長提示在 60–160 欄都會在空白處換行、整句可見，不會截斷或蓋到輸入框。版本號跟著升，`claude plugin update` 才收得到。（Claude）
 
+### 變更（文件）
+
+- README 章節重排：兩份 README 改為簡介 → 快速開始 → 掛到 Claude Code → 各 agent（Grok CLI、direct-api）→ 自動更新 → 其餘進階章節，新讀者不再一開頭就撞上 Grok 的內部驗收細節。Grok 唯讀旗標與 F2 實機驗證點、重啟接回驗收指令這些維護者驗收內容移到 `tools/acceptance/README.md`，README 原處留連結；`package.json` 的 description 補上 Grok、keywords 加 `grok`。（Claude）
+
 ## [6.9.0] - 2026-10-12
 
 > 同專案自動接管：原派工 session 結束後，同一個專案新開的 session 會自動接手還在跑（或結束 30 分鐘內）的 job，不必下指令；

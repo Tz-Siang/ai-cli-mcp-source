@@ -111,3 +111,67 @@ Codex 官方 [設定說明](https://developers.openai.com/codex/config-reference
 Claude 的查額度流程也會送 `/usage`＋Enter；本機 native claude.exe 的原始字串
 在 offset 98953216 有 `Update available! Run:`、offset 107642388 有
 `New version available:`，兩者都由同一提示偵測攔截，並保護延遲按鍵。
+
+## 自 README 移入的驗收內容
+
+以下三塊原本在 `README.zh-TW.md`／`README.md` 的開頭與結尾，屬於維護者驗收流程而非使用者面說明，Issue #16 時移到這裡。先中文，後英文。
+
+### Grok 唯讀模式（strict capabilities）的旗標與實機驗證
+
+唯讀 `capabilities: ["fs/read", "analysis/produce"]` 送
+`--tools Read,Glob,Grep`、`--disallowed-tools` 寫入／shell／派工／動態工具拒絕清單
+（含 Grok 原生 MCP bridge `search_tool,use_tool`）、
+`--disable-web-search` 與 `--permission-mode dontAsk`，不帶 `--always-approve`。
+空 capabilities／只有 analysis/produce 時，因未確認 CLI 零工具模式的語意而直接拒絕；
+未知能力也直接拒絕。原生 MCP 拒絕名稱已在 grok 1.0.50 實測；實機仍須驗證
+shell／寫檔不能繞過；若該 CLI 版本無法強制限制，須把 builder 改成拒絕
+該版本後才可使用唯讀模式。stub 全綠只證明組裝契約，不能代替 vendor 行為驗證。
+
+### Grok 的 F2 實機驗證點
+
+**F2 實機驗證點：** Grok 子行程已帶 `AI_CLI_WORKER=1`，但 Grok 會讀 Claude 的 MCP
+設定，必須確認它啟動的 ai-cli MCP server 也收到這個環境變數。由主導者執行
+`npm run verify:worker-identity -- --family grok`，探針期望 `A=沒有、B=有`，T6 正常產出
+通過自測的 add.py、worker 峰值 ≤ 1；若嘗試再派工，須看到
+`AI_CLI_NESTED_DISPATCH_BLOCKED:` 而且不產生第二個 worker。
+Grok 1.0.50 實測未收到 Claude SessionStart 身分 hook，因此此 agent 用 `--rules` 補鎖。
+真模型驗收由主導者執行，不加入 `npm test`。
+
+### 接回驗收指令
+
+真模型接回驗收使用
+`npm run verify:restart-recovery -- --family claude,codex,grok` 或 `--models ...`。
+每家明確送 medium；報告檢查 recovered/running、完整結果、session、usage 與 UUID 數。
+此命令會消耗模型額度；完整用法見上方「重啟接回實機驗收」。`npm test` 只用 stub。
+
+### English text moved from README.md
+
+#### Grok strict capabilities
+
+Strict `capabilities: ["fs/read", "analysis/produce"]` uses
+`--tools Read,Glob,Grep`, a write/shell/delegation deny list including Grok native
+`search_tool,use_tool` (MCP bridges), `--disable-web-search`,
+and `--permission-mode dontAsk`, without `--always-approve`. Empty capabilities
+and `analysis/produce` alone are refused until the CLI's zero-tool semantics are
+confirmed; unsupported capabilities are also refused. The native MCP deny names
+were verified on Grok 1.0.50; live acceptance should recheck shell/write bypasses;
+if the installed CLI cannot enforce them, do not use strict mode until its builder
+is changed to reject that CLI. Stub tests verify the contract, not vendor enforcement.
+
+#### Grok live F2 verification
+
+The Grok process receives `AI_CLI_WORKER=1`. **Live F2 verification:** Grok imports
+Claude's MCP configuration; confirm its inherited ai-cli MCP server also receives
+that environment and refuses `run` with `AI_CLI_NESTED_DISPATCH_BLOCKED:`. Run
+`npm run verify:worker-identity -- --family grok` from a leader session: the probe
+must report `A=沒有`, `B=有`; T6 must produce the tested add.py with worker peak ≤ 1.
+The tested Grok 1.0.50 did not receive the Claude SessionStart identity hook, which
+is why this backend supplies the lock through `--rules`. Real-model tests remain opt-in.
+
+#### Recovery acceptance command
+
+Run the opt-in live recovery acceptance with
+`npm run verify:restart-recovery -- --family claude,codex,grok` or `--models ...`.
+Every family explicitly receives medium effort. Reports include recovered/running,
+completed output, session, usage and UUID counts. It consumes model quota;
+see "重啟接回實機驗收" above. `npm test` uses stubs only.
