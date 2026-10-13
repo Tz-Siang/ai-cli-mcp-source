@@ -67,7 +67,7 @@ try {
     });
     ok('中間一支失敗時整體 exit 1', r.status === 1, `status=${r.status} ${tail(r.out)}`);
     ok('中間一支失敗後，後面的測試照跑', r.out.includes('MARK-C') && summaryLine(r.out, 'PASS', 'verify-c.mjs'), tail(r.out));
-    ok('彙總表把失敗那支標成 FAIL 並附 exit code', summaryLine(r.out, 'FAIL', 'verify-b.mjs') && /verify-b\.mjs.*exit 3/.test(r.out), tail(r.out));
+    ok('彙總表標出失敗那支（FAIL）並附 exit code', summaryLine(r.out, 'FAIL', 'verify-b.mjs') && /verify-b\.mjs.*exit 3/.test(r.out), tail(r.out));
     ok('彙總表把前面通過的那支標成 PASS', summaryLine(r.out, 'PASS', 'verify-a.mjs'), tail(r.out));
   }
 
