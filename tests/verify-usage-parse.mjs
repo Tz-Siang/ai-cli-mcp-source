@@ -311,6 +311,8 @@ check(
 // ── 9. codex 讀 session 檔的 rate_limits（不開 TUI）──────────────────
 // 實測格式（2026-10-06，~/.codex/sessions/<年>/<月>/<日>/rollout-*.jsonl 的 token_count 事件）。
 const now = Date.now();
+// 成功案例的視窗必須尚未重置；不可固定日曆日期，否則日期一過整套測試就變紅。
+const futureReset = Math.floor(now / 1000) + 7 * 24 * 60 * 60;
 const day = new Date(now);
 const sessHome = mkdtempSync(join(tmpdir(), 'ai-cli-codex-sess-'));
 const dayDir = join(sessHome, 'sessions', String(day.getFullYear()), String(day.getMonth() + 1).padStart(2, '0'), String(day.getDate()).padStart(2, '0'));
@@ -318,7 +320,7 @@ mkdirSync(dayDir, { recursive: true });
 const rlEvent = (ts) => JSON.stringify({
   timestamp: new Date(ts).toISOString(), type: 'event_msg',
   payload: { type: 'token_count', info: {}, rate_limits: {
-    limit_id: 'codex', primary: { used_percent: 21.0, window_minutes: 10080, resets_at: 1791822646 },
+    limit_id: 'codex', primary: { used_percent: 21.0, window_minutes: 10080, resets_at: futureReset },
     secondary: null, plan_type: 'prolite',
   } },
 });
@@ -330,7 +332,7 @@ check(
   '★ 從 session 檔讀到週額度與 plan（不用開 TUI）',
   `得到 ${JSON.stringify({ source: fromFile?.source, weekly: fromFile?.weekly, plan: fromFile?.plan })}`
 );
-check(fromFile?.weekly?.resetAt === new Date(1791822646 * 1000).toISOString() && typeof fromFile?.asOf === 'string', 'session 檔結果附重置時間與資料時間（asOf）');
+check(fromFile?.weekly?.resetAt === new Date(futureReset * 1000).toISOString() && typeof fromFile?.asOf === 'string', 'session 檔結果附重置時間與資料時間（asOf）');
 
 writeFile(sessFile, `${rlEvent(now - 20 * 60_000)}\n`);
 utimesSync(sessFile, new Date(now - 20 * 60_000), new Date(now - 20 * 60_000));

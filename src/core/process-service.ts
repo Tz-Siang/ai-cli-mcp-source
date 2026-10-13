@@ -1,7 +1,7 @@
 /**
- * MCP process 管理：pipe agent 交給持久化 runner，PTY/direct 保持行程內管理。
+ * MCP process 管理：pipe／Windows PTY 交給持久化 runner，direct 保持行程內管理。
  * spawn 決策由 agent 定義驅動：
- *   - agent.win32SpawnMode === 'pty' 且 win32 → ConPTY（agy）
+ *   - agent.win32SpawnMode === 'pty' 且 win32 → detached runner 持有 ConPTY（agy）
  *   - claude/codex → JobStore；agy 的 POSIX pipe 維持舊路徑
  *
  * parser 改呼叫 agent.parseOutput；preserveRawOnFailure 由 process-result 處理。
@@ -29,7 +29,6 @@ import {
   validatePeekTimeSec,
   type PeekProcessResult,
 } from './peek.js';
-import { spawnPty, type PtyChild } from './pty-runner.js';
 import { CircuitBreaker } from './circuit-breaker.js';
 import { currentDispatcher, processJobPublisher, shortText, taskSummary, type LiveJobPublisher, type JobDispatcher, type LiveJob } from './live-jobs.js';
 
@@ -80,7 +79,7 @@ class DirectManagedProcess extends EventEmitter {
   }
 }
 
-type ManagedProcess = ChildProcess | PtyChild | DirectManagedProcess;
+type ManagedProcess = ChildProcess | DirectManagedProcess;
 
 interface ProcessEntry extends ProcessOutputStats {
   pid: number;
@@ -178,12 +177,8 @@ export class ProcessService {
       return this.startDirectProcess(cmd, options.model);
     }
 
-    if (spawnMode === 'pty') {
-      return this.startPtyProcess(cmd, options.model);
-    }
-
-    // 一般 pipe spawn
-    if (cmd.agent !== 'antigravity') {
+    // Windows PTY 與一般 pipe 共用持久化 runner；POSIX agy 保留 legacy 路徑。
+    if (cmd.agent !== 'antigravity' || isWin && spawnMode === 'pty') {
       const job = this.store.start(cmd, options.model);
       this.processManager.set(job.meta.jobId, job as unknown as ProcessEntry);
       return { pid: job.pid, jobId: job.meta.jobId, status: 'started', agent: cmd.agent, message: `${cmd.agent} process started successfully`, ...(cmd.warnings ? { warnings: cmd.warnings } : {}) };
@@ -309,50 +304,6 @@ export class ProcessService {
       status: 'started',
       agent: cmd.agent,
       message: `${cmd.agent} request started successfully`,
-      ...(cmd.warnings ? { warnings: cmd.warnings } : {}),
-    };
-  }
-
-  private startPtyProcess(
-    cmd: ReturnType<typeof buildCliCommand>,
-    model?: string
-  ): { pid: number; status: string; agent: AgentId; message: string } {
-    const { pid, child } = spawnPty(cmd.cliPath, cmd.args, cmd.cwd, (code, killedByUser) => {
-      const entryRef = this.findProcess(pid);
-      if (entryRef) {
-        // 在 emit('close') 前同步更新狀態，避免 waitForProcesses 漏接
-        entryRef.status = killedByUser ? 'failed' : code === 0 ? 'completed' : 'failed';
-        entryRef.exitCode = code ?? undefined;
-        if (killedByUser && !entryRef.stderr.includes('Process terminated by user')) {
-          entryRef.stderr += '\nProcess terminated by user';
-        }
-      }
-    });
-
-    const entry: ProcessEntry = {
-      ...emptyOutputStats(),
-      closed: false,
-      pid,
-      process: child,
-      prompt: cmd.prompt,
-      workFolder: cmd.cwd,
-      model,
-      resolvedModel: cmd.resolvedModel,
-      reasoning_effort: cmd.reasoningEffort || undefined,
-      toolType: cmd.agent,
-      startTime: new Date().toISOString(),
-      stdout: '',
-      stderr: '',
-      status: 'running',
-    };
-    this.processManager.set(pid, entry);
-    this.observeOutput(entry);
-
-    return {
-      pid,
-      status: 'started',
-      agent: cmd.agent,
-      message: `${cmd.agent} process started successfully (pty mode)`,
       ...(cmd.warnings ? { warnings: cmd.warnings } : {}),
     };
   }

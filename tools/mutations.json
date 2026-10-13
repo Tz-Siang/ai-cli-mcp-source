@@ -1899,8 +1899,8 @@
     "file": "src/core/job-runner.ts",
     "script": "verify-durable-jobs.mjs",
     "section": "kill",
-    "from": "      if (await requestTermination?.()) { timedOut = byTimeout; killed = !byTimeout; }",
-    "to": "      if (await requestTermination?.()) { timedOut = byTimeout; killed = false; }",
+    "from": "      if (sent) { timedOut = byTimeout; killed = !byTimeout; }",
+    "to": "      if (sent) { timedOut = byTimeout; killed = false; }",
     "expect": "kill terminates runner worker and SIGTERM ignoring grandchild"
   },
   {
@@ -2485,5 +2485,173 @@
     "to": "setInterval(() => { void this.check(",
     "expect": "auto-adopt timer stays idle until startup finishes",
     "script": "verify-adopt.mjs"
+  },
+  {
+    "name": "PTY: MCP route drops durability",
+    "file": "src/core/process-service.ts",
+    "script": "verify-pty-jobs.mjs",
+    "from": "if (cmd.agent !== 'antigravity' || isWin && spawnMode === 'pty') {",
+    "to": "if (cmd.agent !== 'antigravity') {",
+    "expect": "PTY MCP run returns jobId and verified worker metadata"
+  },
+  {
+    "name": "PTY: CLI route drops durability",
+    "file": "src/core/file-process-service.ts",
+    "script": "verify-pty-jobs.mjs",
+    "from": "if (cmd.agent !== 'antigravity' || isWin && spawnMode === 'pty') {",
+    "to": "if (cmd.agent !== 'antigravity') {",
+    "expect": "PTY CLI FileProcessService routes to JobStore and lists only once"
+  },
+  {
+    "name": "PTY: store omits runner flag",
+    "file": "src/core/job-store.ts",
+    "script": "verify-pty-jobs.mjs",
+    "from": "...(pty ? { pty: true } : {})",
+    "to": "...(pty ? { pty: false } : {})",
+    "expect": "PTY stdout strips split ANSI and get_result wait parse the response"
+  },
+  {
+    "name": "PTY: sanitizer loses carry",
+    "file": "src/core/ansi.ts",
+    "script": "verify-pty-jobs.mjs",
+    "from": "const text = carry + chunk;",
+    "to": "const text = chunk;",
+    "expect": "PTY ANSI cleaner preserves split CSI and long OSC without delaying plain text"
+  },
+  {
+    "name": "PTY: exit resources retained",
+    "file": "src/core/job-runner.ts",
+    "script": "verify-pty-jobs.mjs",
+    "from": "            releaseExitedPty(ptyProc);",
+    "to": "            // mutation: omit resource release",
+    "expect": "PTY nonzero exit fails and the runner naturally exits"
+  },
+  {
+    "name": "PTY: killed exit loses 143",
+    "file": "src/core/job-runner.ts",
+    "script": "verify-pty-jobs.mjs",
+    "from": "exitCode: spec.pty && killed ? 143 : exit.code",
+    "to": "exitCode: exit.code",
+    "expect": "PTY kill_process writes killed true with failed 143 and terminates the tree"
+  },
+  {
+    "name": "PTY: stdin prompt silently ignored",
+    "file": "src/core/job-store.ts",
+    "script": "verify-pty-jobs.mjs",
+    "from": "if (pty && typeof cmd.stdinPrompt === 'string') throw new Error('PTY jobs do not support stdinPrompt');",
+    "to": "if (false) throw new Error('PTY jobs do not support stdinPrompt');",
+    "expect": "PTY rejects stdin prompt in store and old runner spec"
+  },
+  {
+    "name": "PTY audit: missing private fields throw",
+    "file": "src/core/pty-runner.ts",
+    "script": "verify-pty-jobs.mjs",
+    "from": "const input = ptyProc?._agent?.inSocket;",
+    "to": "const input = ptyProc._agent.inSocket;",
+    "expect": "PTY resource release tolerates absent private fields and reports release"
+  },
+  {
+    "name": "PTY audit: late data writes after close",
+    "file": "src/core/job-runner.ts",
+    "script": "verify-pty-jobs.mjs",
+    "from": "if (ended) return; // stdout 可能已關閉並被 exit.json 暫存檔重用。",
+    "to": "// mutation: accept late data",
+    "expect": "PTY late onData never writes a closed or reused stdout fd"
+  },
+  {
+    "name": "PTY audit: stdout write error escapes",
+    "file": "src/core/job-runner.ts",
+    "script": "verify-pty-jobs.mjs",
+    "from": "if (!outputFailed) { outputFailed = true; reportPtyError('PTY stdout write failed', error); }",
+    "to": "throw error;",
+    "expect": "PTY onData write errors are recorded once without uncaught exit"
+  },
+  {
+    "name": "PTY audit: stdout error repeats",
+    "file": "src/core/job-runner.ts",
+    "script": "verify-pty-jobs.mjs",
+    "from": "if (!outputFailed) { outputFailed = true; reportPtyError('PTY stdout write failed', error); }",
+    "to": "if (true) { outputFailed = true; reportPtyError('PTY stdout write failed', error); }",
+    "expect": "PTY onData write errors are recorded once without uncaught exit"
+  },
+  {
+    "name": "PTY audit: flush error escapes",
+    "file": "src/core/job-runner.ts",
+    "script": "verify-pty-jobs.mjs",
+    "from": "catch (error) { reportPtyError('PTY stdout flush failed', error); }",
+    "to": "catch (error) { throw error; }",
+    "expect": "PTY flush and write exceptions cannot prevent exit persistence"
+  },
+  {
+    "name": "PTY audit: cleanup success required to resolve",
+    "file": "src/core/job-runner.ts",
+    "script": "verify-pty-jobs.mjs",
+    "from": "        try {\n          try { const text = cleaner.flush(); if (text) writeSync(stdout, text); }\n          catch (error) { reportPtyError('PTY stdout flush failed', error); }\n          try {\n            releaseExitedPty(ptyProc);\n          } catch (error) { reportPtyError('PTY resource release failed', error); }\n        } finally { resolveClose({ code: exitCode, signal: null }); }",
+    "to": "          try { const text = cleaner.flush(); if (text) writeSync(stdout, text); }\n          catch (error) { reportPtyError('PTY stdout flush failed', error); }\n          try {\n            releaseExitedPty(ptyProc);\n            resolveClose({ code: exitCode, signal: null });\n          } catch (error) { reportPtyError('PTY resource release failed', error); }\n",
+    "expect": "PTY onExit release exceptions still persist correct results"
+  },
+  {
+    "name": "PTY audit: malformed CSI treated as prefix",
+    "file": "src/core/ansi.ts",
+    "script": "verify-pty-jobs.mjs",
+    "from": "if (ANSI_PREFIX.test(tail)) {",
+    "to": "if (!complete) {",
+    "expect": "PTY malformed CSI never withholds later text"
+  },
+  {
+    "name": "PTY audit: carry has no limit",
+    "file": "src/core/ansi.ts",
+    "script": "verify-pty-jobs.mjs",
+    "from": "if (tail.length <= ANSI_CARRY_LIMIT) carry = tail;",
+    "to": "if (true) carry = tail;",
+    "expect": "PTY incomplete OSC and DCS carry is bounded"
+  },
+  {
+    "name": "PTY audit: OSC definition drifts",
+    "file": "src/core/ansi.ts",
+    "script": "verify-pty-jobs.mjs",
+    "from": "const ANSI_COMPLETE = [ANSI_OSC, ANSI_STR_DCS, ANSI_CSI, ANSI_TWO_CHAR]",
+    "to": "const ANSI_COMPLETE = [/\\x1b\\][^\\x07]*(?:\\x07|\\x1b\\\\)/g, ANSI_STR_DCS, ANSI_CSI, ANSI_TWO_CHAR]",
+    "expect": "PTY OSC matches stripAnsi and flush drops incomplete sequences"
+  },
+  {
+    "name": "PTY audit: flush leaks incomplete escape",
+    "file": "src/core/ansi.ts",
+    "script": "verify-pty-jobs.mjs",
+    "from": "flush(): string { carry = ''; return ''; }",
+    "to": "flush(): string { const text = carry; carry = ''; return text; }",
+    "expect": "PTY OSC matches stripAnsi and flush drops incomplete sequences"
+  },
+  {
+    "name": "PTY audit: missing identity disables console kill",
+    "file": "src/core/job-runner.ts",
+    "script": "verify-pty-jobs.mjs",
+    "from": "if (spec.pty && !worker) {",
+    "to": "if (false) {",
+    "expect": "PTY missing worker identity uses owned console kill"
+  },
+  {
+    "name": "PTY audit: console kill allowed after exit",
+    "file": "src/core/job-runner.ts",
+    "script": "verify-pty-jobs.mjs",
+    "from": "if (!ended) { ptyProc.kill(); sent = true; }",
+    "to": "if (true) { ptyProc.kill(); sent = true; }",
+    "expect": "PTY console fallback never kills after onExit"
+  },
+  {
+    "name": "PTY audit: failed kill sets flags",
+    "file": "src/core/job-runner.ts",
+    "script": "verify-pty-jobs.mjs",
+    "from": "if (!ended) { ptyProc.kill(); sent = true; }",
+    "to": "if (!ended) { timedOut = byTimeout; killed = !byTimeout; ptyProc.kill(); sent = true; }",
+    "expect": "PTY failed console kill does not mark killed or timedOut"
+  },
+  {
+    "name": "PTY audit: async failure hides reason",
+    "file": "src/core/job-runner.ts",
+    "script": "verify-pty-jobs.mjs",
+    "from": "const exitError = spec.pty && !ptyOutput",
+    "to": "const exitError = false && !ptyOutput",
+    "expect": "PTY asynchronous spawn failure reports a failed job with reason"
   }
 ]

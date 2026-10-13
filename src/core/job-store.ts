@@ -35,6 +35,8 @@ export interface JobMeta {
 export interface JobExit { exitCode: number | null; signal: string | null; endTime: string; timedOut: boolean; killed: boolean; error?: string }
 export interface RunnerSpec {
   command: string; args: string[]; cwd: string; stdin: boolean; needsShell: boolean; timeoutMs?: number;
+  /** 可省略：舊 server 的 spec 照舊走 pipe；meta/exit 格式不變。 */
+  pty?: boolean;
   meta: Omit<JobMeta, 'pid' | 'runner' | 'worker'>; serverPid: number; principalPid: number;
 }
 export function atomicJson(path: string, value: unknown): void {
@@ -606,6 +608,9 @@ export class JobStore {
     }
   }
   start(cmd: BuiltCommand, model?: string, timeoutMs?: number): StoredJob {
+    const pty = process.platform === 'win32' && getAgent(cmd.agent).win32SpawnMode === 'pty';
+    // ConPTY 沒有 stdin prompt 通道；現有 agy 只傳 -p argv，不可默默遺失未來的 prompt。
+    if (pty && typeof cmd.stdinPrompt === 'string') throw new Error('PTY jobs do not support stdinPrompt');
     const jobId = randomUUID(), directory = join(this.dir, 'jobs', jobId);
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     if (cmd.temporaryPromptFile) {
@@ -625,7 +630,7 @@ export class JobStore {
       ...(this.source === 'mcp' && this.projectDir !== null ? { projectDir: this.projectDir } : {}),
       server: this.server, principal: this.principal, recoverable: true };
     const spec: RunnerSpec = { command: cmd.cliPath, args: cmd.args, cwd: cmd.cwd, stdin: typeof cmd.stdinPrompt === 'string',
-      needsShell: process.platform === 'win32' && !getAgent(cmd.agent).win32DirectExec, timeoutMs, meta: metaBase, serverPid: process.pid, principalPid: this.principal?.pid ?? process.ppid };
+      needsShell: process.platform === 'win32' && !getAgent(cmd.agent).win32DirectExec, ...(pty ? { pty: true } : {}), timeoutMs, meta: metaBase, serverPid: process.pid, principalPid: this.principal?.pid ?? process.ppid };
     atomicJson(join(directory, 'launch.tmp'), spec);
     const child = spawn(process.execPath, [fileURLToPath(new URL('./job-runner.js', import.meta.url)), directory], {
       cwd: fileURLToPath(new URL('../../', import.meta.url)), env: buildWorkerEnv(), detached: true, stdio: 'ignore', windowsHide: true });

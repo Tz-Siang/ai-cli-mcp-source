@@ -283,14 +283,9 @@ async function edgeChecks(ProcessService, FileProcessService, buildLiveness, emp
   const fresh = await new FileProcessService({ stateDir, cliPaths: { codex: stub } }).getProcessResult(process.pid);
   check('File fresh reader matches event count', fresh.liveness.eventCount === 501 && fresh.liveness.lastEvent === 'turn.started');
 
-  // 模擬既有 PTY 短暫競態：OS PID 已消失，onExit 還沒寫 metadata。
-  // 不靠時間運氣，也不能把 alive 寫死 true；移除 PTY guard 後仍沿用 lost 語意。
+  // Windows PTY 已交給 runner，不再有行程內 ptyManagedPids guard；legacy 缺回報仍為 lost。
   const missingPid = 2147483647;
   writeFileSync(metaPath, JSON.stringify({ ...meta, pid: missingPid }));
-  reader.ptyManagedPids.add(missingPid);
-  const disappeared = await reader.getProcessResult(missingPid);
-  check('File disappeared process alive is false', disappeared.status === 'running' && disappeared.liveness?.alive === false);
-  reader.ptyManagedPids.delete(missingPid);
   const lost = await reader.getProcessResult(missingPid);
   check('File disappeared without report stays lost', lost.status === 'lost' && !('liveness' in lost));
 

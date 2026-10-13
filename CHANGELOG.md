@@ -10,6 +10,14 @@
 
 ### 修復
 
+- Windows agy（ConPTY）的背景工作關掉 session 就跟著被終止，新 session 也接不回來：
+  agy 原本在 MCP server 行程內跑，沒有寫進 job store（6.8.0 預告的「6.9.0 處理」漏做了）。
+  現在改由獨立 runner 持有，原 session 結束後 agy 繼續跑，同專案的新 session 會自動接管，
+  `get_result`／`wait`／`peek`／`kill_process` 都能用；jobs、list 與面板不會重複列出。
+  使用者終止仍是 failed／exit 143；runner 收尾出錯也一定寫下結果，不會卡在 running；
+  agy 輸出裡格式錯誤或不完整的 ANSI 序列不再扣住後面的輸出。
+  POSIX agy 與 direct-api **仍不可接回／接管**。（Codex）
+
 - ai-cli-jobs 面板 0.1.4：新 session 開場後，接管來的 job 要將近一分鐘才出現在面板上。面板只在開場 5 秒時查一次，之後每 60 秒才查一次；
   但伺服器要等 MCP ready 之後，才在背景查行程身分、完成接管。2026-10-13 在這台 Windows 連開三個 session 實測，
   從 claude.exe 啟動到 meta.json 寫下 `adoptedAt` 分別是 7、11、7 秒，所以 5 秒那次每次都撲空。

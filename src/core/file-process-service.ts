@@ -4,7 +4,7 @@
  *
  * claude/codex 與 MCP 共用 JobStore + detached runner，輸出由 OS fd 直寫。
  * 舊 cwds/meta.json + exit-status.json 保留相容讀取。
- * agy/win32 維持 ConPTY；direct-api 維持行程內 HTTP。
+ * agy/win32 的 ConPTY 由 detached runner 持有；POSIX agy 與 direct-api 保留既有路徑。
  *
  * spawn/parser 決策改由 registry 驅動。
  */
@@ -31,14 +31,12 @@ import {
 } from 'node:fs';
 import { join, basename, dirname } from 'node:path';
 import { homedir } from 'node:os';
-import { createRequire } from 'node:module';
 import type { AgentId } from '../agents/types.js';
 import { getAgent } from '../agents/registry.js';
 import { buildCliCommand, type BuildCliCommandOptions } from './command-builder.js';
 import { resolveAllCliPaths } from './doctor.js';
 import { buildProcessResult } from './process-result.js';
 import { buildLiveness, emptyOutputStats, listProcessTiming, type ProcessOutputStats } from './liveness.js';
-import { stripAnsi } from './ansi.js';
 import { CircuitBreaker } from './circuit-breaker.js';
 import {
   LivenessEventExtractor,
@@ -57,14 +55,6 @@ const SIGTERM_EXIT_CODE = 143;
 const pendingJobIdentities = new Set<Promise<unknown>>();
 /** CLI 已送出 PID 後，退出前等 metadata 補寫完成，避免強制退出截斷查詢。 */
 export async function flushJobIdentities(): Promise<void> { await Promise.all([...pendingJobIdentities]); }
-
-const patchRequire = createRequire(import.meta.url);
-let ptyModule: any = null;
-function loadPtyModule(): any {
-  if (ptyModule) return ptyModule;
-  ptyModule = patchRequire('@homebridge/node-pty-prebuilt-multiarch');
-  return ptyModule;
-}
 
 function resolveDefaultStateDir(): string {
   return process.env.AI_CLI_STATE_DIR || join(homedir(), '.local', 'state', 'ai-cli');
@@ -137,7 +127,6 @@ export class FileProcessService {
   private store: JobStore;
   private gc?: NodeJS.Timeout;
   private cliPaths: Partial<Record<AgentId, string>>;
-  private ptyManagedPids = new Set<number>();
   private breaker: CircuitBreaker;
   private directPidSequence = 0;
   private dispatcher: JobDispatcher = { pid: process.pid, parentPid: process.ppid };
@@ -192,11 +181,7 @@ export class FileProcessService {
     if (spawnMode === 'direct') {
       return this.startDirectTracked(cmd, model);
     }
-    if (spawnMode === 'pty') {
-      return this.startPtyTracked(cmd, model);
-    }
-
-    if (cmd.agent !== 'antigravity') {
+    if (cmd.agent !== 'antigravity' || isWin && spawnMode === 'pty') {
       await this.store.ready; await this.store.identify();
       const job = this.store.start(cmd, model);
       const pending = this.waitForRunnerMeta(job.pid);
@@ -292,78 +277,6 @@ export class FileProcessService {
       status: stored.status,
       agent: cmd.agent,
       message: `${cmd.agent} request ${stored.status}`,
-    };
-  }
-
-  /**
-   * Windows detached spawn：用 Node 腳本當 wrapper（避開 batch 引號地獄）。
-   * Node 子程序可取得自己的 PID，對齊 FileProcessService 的 PID→目錄映射。
-   */
-  private async startPtyTracked(cmd: ReturnType<typeof buildCliCommand>, model?: string) {
-    const pty = loadPtyModule();
-    const cwdKey = this.resolveCwdKey(cmd.cwd);
-    const ptyProc = pty.spawn(cmd.cliPath, cmd.args, {
-      name: 'xterm-color',
-      cols: 200,
-      rows: 50,
-      cwd: cmd.cwd,
-      env: buildWorkerEnv(),
-    });
-    const pid: number | undefined = ptyProc.pid;
-    if (!pid) {
-      throw new Error(`Failed to start ${cmd.agent} CLI process (pty.spawn returned no pid)`);
-    }
-    const startTime = new Date().toISOString();
-    const processDir = this.resolveProcessDir(cmd.cwd, pid);
-    mkdirSync(processDir, { recursive: true });
-    const stdoutPath = this.resolveStdoutPath(processDir);
-    const stderrPath = this.resolveStderrPath(processDir);
-    const exitStatusPath = this.resolveExitStatusPath(processDir);
-    this.touchFile(stdoutPath);
-    this.touchFile(stderrPath);
-    this.ptyManagedPids.add(pid);
-    ptyProc.onData((d: string) => {
-      try {
-        appendFileSync(stdoutPath, stripAnsi(d));
-      } catch {
-        /* ignore */
-      }
-    });
-    ptyProc.onExit(({ exitCode }: { exitCode: number }) => {
-      const code = exitCode ?? 0;
-      const status = code === 0 ? 'completed' : 'failed';
-      try {
-        const tmp = exitStatusPath + '.' + pid;
-        writeFileSync(tmp, JSON.stringify({ status, exitCode: code }, null, 2));
-        renameSync(tmp, exitStatusPath);
-      } catch {
-        /* ignore */
-      }
-      this.ptyManagedPids.delete(pid);
-    });
-    const stored: StoredProcess = {
-      ...emptyOutputStats(),
-      pid,
-      prompt: cmd.prompt,
-      workFolder: cmd.cwd,
-      cwdKey,
-      model,
-      resolvedModel: cmd.resolvedModel,
-      reasoning_effort: cmd.reasoningEffort || undefined,
-      dispatcher: this.dispatcher,
-      toolType: cmd.agent,
-      startTime,
-      stdoutPath,
-      stderrPath,
-      status: 'running',
-    };
-    this.writeProcess(stored);
-    this.trackJobIdentity(stored);
-    return {
-      pid,
-      status: 'started',
-      agent: cmd.agent,
-      message: `${cmd.agent} process started successfully (pty mode)`,
     };
   }
 
@@ -691,8 +604,6 @@ export class FileProcessService {
       return proc;
     }
     if (!isProcessRunning(proc.pid)) {
-      // pty-managed：OS 報告 pid 消失可能早於 onExit 寫 exit-status，先維持 running
-      if (this.ptyManagedPids.has(proc.pid)) return proc;
       /*
         PID 不見了，但**沒有**結束回報。我們不知道它是成功還是失敗
         ——說 failed 是拿一個看起來合理的結論蓋掉「不知道」。

@@ -94,7 +94,7 @@ in `update.supported`.
 Each supported CLI becomes a tool you can call from an MCP client. Jobs run in the
 background: `run` returns a PID immediately, and `list_processes`, `peek`, `wait` and
 `get_result` observe it while it works. Two surfaces expose this — the MCP server and
-the `ai-cli` command line — sharing durable state for Claude, Codex and Grok.
+the `ai-cli` command line — sharing durable state for Claude, Codex, Grok and Windows Antigravity.
 
 ## Architecture
 
@@ -121,16 +121,17 @@ src/
 The split is the point: `agents/` is data about each CLI, `core/` is the machinery.
 A new backend never requires editing the machinery.
 
-Claude, Codex and Grok jobs run under a detached runner and outlive their MCP server or
+Claude, Codex, Grok and Windows Antigravity (ConPTY) jobs run under a detached runner and outlive their MCP server or
 CLI launcher. A restarted MCP server recovers only jobs dispatched by the same
 principal process, verified by PID plus OS creation time; recovered results include
 `recovered: true`. Recovery observes existing work and never reruns or retries it.
 A recorded exit determines completion; a live verified runner stays running; if
 both runner and worker are gone without an exit record, the job becomes `lost`
 and its output remains available. The public PID identifies the runner.
-Antigravity (including ConPTY) and `direct-api` remain unrecoverable across MCP
-restarts. The PTY path is not detached, and `direct-api` starts no
-subprocess at all: on the CLI it runs in-process and blocks until the request
+POSIX Antigravity and `direct-api` remain unrecoverable across MCP
+restarts and cannot be adopted. Windows ConPTY workers are held by the detached runner;
+PTY stdout combines both streams and strips ANSI, while stderr holds runner errors.
+`direct-api` starts no subprocess at all: on the CLI it runs in-process and blocks until the request
 finishes, while the MCP server still returns a PID immediately.
 
 The principal is the first ancestor outside the package launcher chain. Command-line
@@ -236,7 +237,9 @@ switch on, and not running under a worker (CLI previews use the current cwd, the
 and the environment marker). Candidate `model` matches list rows (requested model first),
 and `status` comes only from `exit.json` / `lost.json`.
 
-Only durable MCP jobs with `meta.json` and a verified runner identity are eligible.
+Only durable MCP jobs (Claude, Codex, Grok, and Windows Antigravity/ConPTY) with
+`meta.json` and a verified runner identity are eligible. POSIX Antigravity and
+`direct-api` cannot be adopted; CLI jobs are visible globally but cannot be adopted.
 The original dispatching session must have ended: an absent PID or a different OS
 creation identity proves this; identity lookup failure refuses adoption. When the
 principal is null (principal identification failed at dispatch), the dispatching MCP
@@ -277,7 +280,7 @@ heading plus menu choices/cursor, or “Press Enter to update”). Passive npm-t
 installer hints and update progress do not block queries. Codex can fall back to a recent
 session rate-limit record if an update menu blocks its TUI, including a refresh query.
 
-The `live-jobs/` snapshots remain for unrecoverable Antigravity/direct-api and
+The `live-jobs/` snapshots remain for unrecoverable POSIX Antigravity/direct-api and
 6.7.0 compatibility; legacy CLI `cwds/` files can still be read. Their summaries
 expire after 30 minutes, and snapshots require a verified live owner. All sessions
 must share `AI_CLI_STATE_DIR`. Identity lookup uses CIM on Windows, `/proc` on Linux

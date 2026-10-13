@@ -113,6 +113,7 @@ export class AiCliMcpServer {
 • Multi-step workflows & GitHub integration
 
 **IMPORTANT**: This tool now returns immediately with a PID. Use other tools to check status and get results.
+Claude, Codex, Grok and Windows Antigravity (ConPTY) jobs return a durable jobId, outlive the server, and can be recovered or adopted. POSIX Antigravity and direct-api jobs cannot be recovered or adopted.
 For cost-aware dispatch (batching, duplicate jobs, polling, and agentOutput.usage), read the models tool's dispatchGuidance.
 
 **Candidate models** — this is NOT an allowlist. claude is the routing catch-all, so a name that is
@@ -174,7 +175,7 @@ ${getSupportedModelsDescription()}
         {
           name: 'adopt',
           description:
-            'Jobs in the same project directory are automatically adopted after the original dispatching session has ended; this tool is usually unnecessary. Use it manually for cross-project takeover. Jobs remain eligible throughout execution and for 30 minutes after completion, subject to store capacity limits. Omit pid and jobId to list eligible candidates with autoAdopt scope flags; a PID selects its latest job, and both selectors must agree.',
+            'Only durable MCP jobs (Claude, Codex, Grok and Windows Antigravity/ConPTY) can be adopted; POSIX Antigravity, direct-api and CLI jobs cannot. Jobs in the same project directory are automatically adopted after the original dispatching session has ended; this tool is usually unnecessary. Use it manually for cross-project takeover. Jobs remain eligible throughout execution and for 30 minutes after completion, subject to store capacity limits. Omit pid and jobId to list eligible candidates with autoAdopt scope flags; a PID selects its latest job, and both selectors must agree.',
           inputSchema: {
             type: 'object',
             properties: {

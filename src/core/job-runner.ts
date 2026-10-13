@@ -8,6 +8,8 @@ import { atomicJson, readJobExit, sameIdentity, mayBeAlive, type RunnerSpec, typ
 import { lookupIdentities, type ProcessIdentity, type IdentityLookup } from './live-jobs.js';
 
 import { identityOnly } from './principal.js';
+import { loadPtyModule, releaseExitedPty } from './pty-runner.js';
+import { createAnsiCleaner } from './ansi.js';
 
 /** 身分查詢暫時失敗可重試；只有不同建立時間才永久停止。 */
 export function verifiedTermination(worker: ProcessIdentity, lookup: IdentityLookup, send: () => Promise<boolean>, alive = mayBeAlive) {
@@ -23,7 +25,7 @@ export function verifiedTermination(worker: ProcessIdentity, lookup: IdentityLoo
     return active;
   };
 }
-interface RunnerOptions { lookup?: IdentityLookup; save?: typeof atomicJson; pause?: (ms: number) => Promise<void> }
+interface RunnerOptions { lookup?: IdentityLookup; save?: typeof atomicJson; pause?: (ms: number) => Promise<void>; cleaner?: ReturnType<typeof createAnsiCleaner> }
 export async function runJob(directory: string, options: RunnerOptions = {}): Promise<void> {
   const lookup = options.lookup ?? lookupIdentities, save = options.save ?? atomicJson;
   const pause = options.pause ?? (ms => new Promise(resolve => setTimeout(resolve, ms)));
@@ -47,30 +49,68 @@ export async function runJob(directory: string, options: RunnerOptions = {}): Pr
   let failureFd: number | undefined;
   const openFailureLog = () => failureFd ??= openSync(join(directory, 'stderr.log'), 'a', 0o600);
   if (!runner.started) { fail('Cannot identify runner after 3 attempts; worker was not started'); if (failureFd !== undefined) closeSync(failureFd); return; }
+  if (spec.pty && spec.stdin) { fail('PTY jobs do not support stdinPrompt'); if (failureFd !== undefined) closeSync(failureFd); return; }
   const stdout = openSync(join(directory, 'stdout.log'), 'a', 0o600);
   const stderr = openSync(join(directory, 'stderr.log'), 'a', 0o600);
   const stdin = spec.stdin ? openSync(join(directory, 'stdin.tmp'), 'r') : undefined;
-  let child: ReturnType<typeof spawn>;
+  let child: { pid?: number; exitCode: number | null; signalCode: NodeJS.Signals | null; kill(signal?: NodeJS.Signals): boolean };
+  let pipeChild: ReturnType<typeof spawn> | undefined;
+  let ptyProc: any;
+  let ended = false, outputFailed = false, ptyOutput = false;
+  const reportPtyError = (message: string, error: unknown) => {
+    const detail = `${message}: ${(error as Error).message}\n`;
+    try { writeSync(stderr, detail); } catch { console.error(detail); }
+  };
+  let killed = false, timedOut = false, terminating = false, worker: ProcessIdentity | null = null;
+  let resolveClose!: (exit: { code: number | null; signal: string | null }) => void;
+  const closed = new Promise<{ code: number | null; signal: string | null }>(resolve => { resolveClose = resolve; });
+  const cleaner = options.cleaner ?? createAnsiCleaner();
   try {
-    const command = spec.needsShell ? process.env.ComSpec || process.env.COMSPEC || 'cmd.exe' : spec.command;
-    const args = spec.needsShell ? ['/d', '/s', '/c', `""${spec.command}" ${spec.args.map(a => /[\s&|<>^()]/.test(a) ? `"${a}"` : a).join(' ')}"`] : spec.args;
-    child = spawn(command, args, { cwd: spec.cwd, stdio: [stdin ?? 'ignore', stdout, stderr],
-      shell: false, detached: process.platform !== 'win32', windowsHide: true, windowsVerbatimArguments: spec.needsShell });
+    if (spec.pty) {
+      // JobStore 已以 buildWorkerEnv 啟動 runner，直接繼承；ConPTY 不經 cmd.exe。
+      ptyProc = loadPtyModule().spawn(spec.command, spec.args, {
+        name: 'xterm-color', cols: 200, rows: 50, cwd: spec.cwd, env: process.env,
+      });
+      if (!ptyProc.pid) throw new Error('pty.spawn returned no pid');
+      child = { pid: ptyProc.pid, exitCode: null, signalCode: null, kill: () => { ptyProc.kill(); return true; } };
+      ptyProc.onData((data: string) => {
+        if (ended) return; // stdout 可能已關閉並被 exit.json 暫存檔重用。
+        try { const text = cleaner.push(data); if (text) { writeSync(stdout, text); ptyOutput = true; } }
+        catch (error) {
+          if (!outputFailed) { outputFailed = true; reportPtyError('PTY stdout write failed', error); }
+        }
+      });
+      ptyProc.onExit(({ exitCode }: { exitCode: number }) => {
+        if (ended) return;
+        ended = true;
+        child.exitCode = exitCode;
+        try {
+          try { const text = cleaner.flush(); if (text) writeSync(stdout, text); }
+          catch (error) { reportPtyError('PTY stdout flush failed', error); }
+          try {
+            releaseExitedPty(ptyProc);
+          } catch (error) { reportPtyError('PTY resource release failed', error); }
+        } finally { resolveClose({ code: exitCode, signal: null }); }
+      });
+    } else {
+      const command = spec.needsShell ? process.env.ComSpec || process.env.COMSPEC || 'cmd.exe' : spec.command;
+      const args = spec.needsShell ? ['/d', '/s', '/c', `""${spec.command}" ${spec.args.map(a => /[\s&|<>^()]/.test(a) ? `"${a}"` : a).join(' ')}"`] : spec.args;
+      child = pipeChild = spawn(command, args, { cwd: spec.cwd, stdio: [stdin ?? 'ignore', stdout, stderr],
+        shell: false, detached: process.platform !== 'win32', windowsHide: true, windowsVerbatimArguments: spec.needsShell });
+      pipeChild.once('error', error => { writeSync(stderr, `Process error: ${error.message}\n`); resolveClose({ code: 1, signal: null }); });
+      pipeChild.once('close', (code, signal) => resolveClose({ code, signal }));
+    }
   } catch (error) {
     fail(`Worker spawn failed: ${(error as Error).message}`);
     if (failureFd !== undefined) closeSync(failureFd);
     closeSync(stderr);
+    closeSync(stdout);
     rmSync(join(directory, 'stdin.tmp'), { force: true });
     return;
-  } finally { if (stdin !== undefined) closeSync(stdin); closeSync(stdout); }
+  } finally { if (stdin !== undefined) closeSync(stdin); if (pipeChild) closeSync(stdout); }
   // runner 不保留 prompt、指令參數；只在 launch.tmp 中存到讀完為止。
   spec.args = [];
-  let killed = false, timedOut = false, terminating = false, worker: ProcessIdentity | null = null;
   let interval: NodeJS.Timeout | undefined, timeout: NodeJS.Timeout | undefined;
-  let resolveClose!: (exit: { code: number | null; signal: string | null }) => void;
-  const closed = new Promise<{ code: number | null; signal: string | null }>(resolve => { resolveClose = resolve; });
-  child.once('error', error => { writeSync(stderr, `Process error: ${error.message}\n`); resolveClose({ code: 1, signal: null }); });
-  child.once('close', (code, signal) => resolveClose({ code, signal }));
   if (child.pid) { try { worker = (await lookup([child.pid])).get(child.pid) ?? null; } catch (error) { console.error('ai-cli worker identity:', error); } }
   if (worker) worker = identityOnly(worker);
   const meta = { ...spec.meta, pid: process.pid, runner, worker,
@@ -85,6 +125,7 @@ export async function runJob(directory: string, options: RunnerOptions = {}): Pr
     await closed;
     fail(`Cannot persist worker metadata: ${(error as Error).message}`, worker);
     if (failureFd !== undefined) closeSync(failureFd);
+    if (spec.pty) closeSync(stdout);
     closeSync(stderr); return;
   }
   let termination: Promise<void> | undefined;
@@ -121,8 +162,13 @@ export async function runJob(directory: string, options: RunnerOptions = {}): Pr
     if (terminating) return termination ?? Promise.resolve();
     terminating = true;
     termination = (async () => {
-      if (await requestTermination?.()) { timedOut = byTimeout; killed = !byTimeout; }
-    })().catch(error => { writeSync(stderr, `Termination failed: ${error.message}\n`); }).finally(() => { terminating = false; });
+      let sent = false;
+      if (spec.pty && !worker) {
+        // 尚未 onExit 時 console 仍由這個 agent 持有；不可在退出後重查／終止 PID。
+        if (!ended) { ptyProc.kill(); sent = true; }
+      } else { sent = !!await requestTermination?.(); }
+      if (sent) { timedOut = byTimeout; killed = !byTimeout; }
+    })().catch(error => { reportPtyError('Termination failed', error); }).finally(() => { terminating = false; });
     return termination;
   };
   const timeoutAt = spec.timeoutMs === undefined ? Infinity : Date.now() + spec.timeoutMs;
@@ -138,8 +184,19 @@ export async function runJob(directory: string, options: RunnerOptions = {}): Pr
   await termination;
   if (interval) clearInterval(interval); if (timeout) clearTimeout(timeout);
   process.off('SIGTERM', onTerm); process.off('SIGINT', onTerm);
+  // 對齊舊 in-process PTY：使用者終止仍為 failed / 143，提示存進 stderr 供舊讀端解析。
+  if (spec.pty && killed) {
+    try { writeSync(stderr, '\nProcess terminated by user'); } catch (error) { reportPtyError('PTY termination hint failed', error); }
+  }
+  const exitError = spec.pty && !ptyOutput && exit.code !== 0 && exit.code !== null && !killed && !timedOut
+    ? `PTY worker exited with code ${exit.code} without output` : undefined;
+  if (exitError) reportPtyError('Process error', new Error(exitError));
+  if (spec.pty) {
+    try { closeSync(stdout); } catch (error) { reportPtyError('PTY stdout close failed', error); }
+  }
   closeSync(stderr);
-  const report: JobExit = { exitCode: exit.code, signal: exit.signal, endTime: new Date().toISOString(), timedOut, killed };
+  const report: JobExit = { exitCode: spec.pty && killed ? 143 : exit.code, signal: exit.signal, endTime: new Date().toISOString(), timedOut, killed,
+    ...(exitError ? { error: exitError } : {}) };
   if (!readJobExit(directory)) save(join(directory, 'exit.json'), report);
   for (const file of ['stdin.tmp', 'kill.json']) rmSync(join(directory, file), { force: true });
 }

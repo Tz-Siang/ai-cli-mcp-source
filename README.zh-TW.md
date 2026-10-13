@@ -575,13 +575,14 @@ prompt 第一個有意義行的 40 字摘要、經過時間 m:ss、最後事件�
 ai-cli PID）。窄終端機會截短欄位，避免換行。父行程可能是 shell 或 Node launcher；
 無法取得名稱時顯示 `unknown`。
 
-Claude／Codex／Grok 的 MCP 與 CLI job 共用 `AI_CLI_STATE_DIR/jobs/<UUID>/`，
+Claude／Codex／Grok／Windows agy（ConPTY）的 MCP 與 CLI job 共用 `AI_CLI_STATE_DIR/jobs/<UUID>/`，
 預設為 `~/.local/state/ai-cli/jobs/`。每個 job 都由 detached runner 當 worker 的父行程，
 MCP server 或 CLI 啟動端退出後仍可繼續。對外 PID 為 runner PID；目錄 UUID 才是 job 身分。
 MCP 重啟只接回同一主導者（排除套件啟動器後的祖先 PID＋OS 建立時間）派的 job，結果附
 `recovered: true`，接回絕不重跑、重試或重派。有 `exit.json` 就還原完成／失敗；
 runner 身分相符且活著則繼續追蹤；runner 與 worker 都消失且無 exit 時標為 `lost`，保留輸出。
-agy（含 ConPTY）與 direct-api 維持現有執行方式，無法在 MCP 重啟後接回。
+Windows agy 的 ConPTY 由 detached runner 持有，PTY 合併 stdout／stderr 並清除 ANSI，stderr.log 只放 runner 錯誤與終止提示。
+POSIX agy 與 direct-api 維持現有執行方式，無法在 MCP 重啟後接回或接管。
 
 主導者取第一個不是套件啟動器的祖先：以命令列精準跳過 `npx-cli.js`、
 `npm-cli.js exec`／`x`，以及執行 npx／npm exec 的 `cmd.exe`、POSIX `sh` 包裝。
@@ -643,7 +644,8 @@ runner 不可能在更上面）。祖先鏈查不到時視為無法確認，只�
 候選帶 `projectDir`（舊 job 為 `null`）與 `autoAdopt`，表示本 MCP 會不會自動接它：在自動範圍內、開關未關、且不是 worker 底下的 MCP；
 CLI 以目前 cwd、開關與環境標記預覽。候選的 `model` 與 list 相同（優先請求的模型），`status` 只依 `exit.json`／`lost.json` 判定。
 
-只有已寫入 `meta.json` 且 runner 身分已確認的持久化 MCP job 才可接管。
+只有已寫入 `meta.json` 且 runner 身分已確認的持久化 MCP job（Claude／Codex／Grok／Windows agy ConPTY）才可接管。
+POSIX agy、direct-api 不可接管；CLI job 全域可見，但不適用 MCP 接管。
 原派工 session 必須已結束：PID 不存在或 OS 建立時間不同才算確認；身分查詢失敗會拒絕。
 principal 為 null（派工時辨識 principal 失敗）時改看派工的 MCP server：server 已確認結束才可接；
 server 仍在或無法確認則自動、手動都拒絕（錯誤會說明是派工的 MCP server 仍在）。

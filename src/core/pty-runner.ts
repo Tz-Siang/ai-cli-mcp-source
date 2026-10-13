@@ -5,22 +5,37 @@
  * 配置 ConPTY，並把 pty handle 包成 ChildProcess-like 介面，讓 process-service
  * 的其餘程式碼（list/wait/peek/kill）對 PTY 完全無感。
  *
- * 1:1 還原 dist/process-service.js 的 _startAntigravityPty。
+ * Windows 的工作派送已改由 job-runner 持有 PTY。本 adapter 保留給既有
+ * worker-env 驗證及直接使用者；與 runner 共用載入器及串流 ANSI 清理。
  */
 
 import { EventEmitter } from 'node:events';
 import { buildWorkerEnv } from './worker-env.js';
 import { PassThrough } from 'node:stream';
 import { createRequire } from 'node:module';
-import { stripAnsi } from './ansi.js';
+import { createAnsiCleaner } from './ansi.js';
 
 const patchRequire = createRequire(import.meta.url);
 let ptyModule: any = null;
 
-function loadPtyModule(): any {
+export function loadPtyModule(): any {
   if (ptyModule) return ptyModule;
   ptyModule = patchRequire('@homebridge/node-pty-prebuilt-multiarch');
   return ptyModule;
+}
+
+/**
+ * 只在 onExit（輸出 socket 已關閉）後釋放 runner 的資源，不再對任何 PID 送 signal。
+ * 目前 prebuilt node-pty 的自然退出只 destroy outSocket，留下 inSocket 及 conout
+ * Worker；公開 kill()/destroy() 又會重新列舉 console PID，不能在 PID 可重用後呼叫。
+ * 此處依賴已安裝版本的內部生命週期 API，升級 node-pty 時須跑 verify-pty-jobs。
+ */
+export function releaseExitedPty(ptyProc: any): boolean {
+  const input = ptyProc?._agent?.inSocket;
+  const conout = ptyProc?._agent?._conoutSocketWorker;
+  input?.destroy?.();
+  conout?.dispose?.();
+  return typeof input?.destroy === 'function' || typeof conout?.dispose === 'function';
 }
 
 /** ChildProcess-like 介面，供 process-service 統一處理。 */
@@ -76,7 +91,7 @@ export function spawnPty(
 
   let closed = false;
   let killedByUser = false;
-  let ansiCarry = '';
+  const cleaner = createAnsiCleaner();
 
   child.kill = (_signal?: string): boolean => {
     if (closed) return false;
@@ -91,27 +106,15 @@ export function spawnPty(
 
   ptyProc.onData((d: string) => {
     if (closed) return;
-    // 跨 chunk 保留結尾未完成的 ESC 序列，避免切斷半個序列
-    const combined = ansiCarry + d;
-    const lastEsc = combined.lastIndexOf('\x1b');
-    let toClean = combined;
-    ansiCarry = '';
-    if (lastEsc !== -1 && lastEsc > combined.length - 32) {
-      toClean = combined.slice(0, lastEsc);
-      ansiCarry = combined.slice(lastEsc);
-    }
-    const cleaned = stripAnsi(toClean);
+    const cleaned = cleaner.push(d);
     if (cleaned) stdoutStream.write(cleaned);
   });
 
   ptyProc.onExit(({ exitCode }: { exitCode: number }) => {
     if (closed) return;
     closed = true;
-    if (ansiCarry) {
-      const flushed = stripAnsi(ansiCarry);
-      if (flushed) stdoutStream.write(flushed);
-      ansiCarry = '';
-    }
+    const flushed = cleaner.flush();
+    if (flushed) stdoutStream.write(flushed);
     const code = killedByUser ? 143 : exitCode;
     onClose(code, killedByUser);
     try {
