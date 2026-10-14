@@ -104,6 +104,7 @@ await test('TUI version warning only on untested fallback',async()=>{
 });
 await test('TUI waits for rendered status echo',()=>{
   const dir=join(ROOT,'tests','fixtures','codex-0.162.1');const before=readFileSync(join(dir,'before.ansi'),'utf8'),echo=readFileSync(join(dir,'echo.ansi'),'utf8'),panel=readFileSync(join(dir,'panel.ansi'),'utf8');
+  assert(!/\x1b\[x{2,}/.test(before+echo+panel),'email redaction must preserve CSI control codes');
   assert.deepEqual(us.codexStatusWrites(us.renderTerminal(before)),['/status']);
   assert.deepEqual(us.codexStatusWrites(us.renderTerminal(before+echo)),['\r']);
   assert.equal(us.parseCodexUsage(before+echo+panel).type,'rate_limits');

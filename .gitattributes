@@ -3,4 +3,4 @@
 # 突變測試的「worktree 應乾淨」會因此每輪都判本輪結果不可信。
 
 # 真機 ANSI 素材須保留 CRLF 與控制碼，禁止文字換行轉換。
-tests/fixtures/codex-0.162.1/*.ansi -text
+tests/fixtures/codex-0.162.1/*.ansi -text -diff

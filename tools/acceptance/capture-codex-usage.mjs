@@ -33,7 +33,8 @@ try {
     if (echo && parseCodexUsage(output).type === 'rate_limits' && Date.now() - last > 800) {
       chunks.panel = output.slice(chunks.before.length + chunks.echo.length);
       // 遮罩 email 與 OSC 視窗標題；保留控制碼、字元寬度與原始重繪順序。
-      const redact = raw => raw.replace(/[\w.+-]+@[\w.-]+\.[A-Za-z]+/g, m => 'x'.repeat(m.length))
+      const redact = raw => raw.split(/(\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\))/g)
+        .map(part => part.startsWith('\x1b') ? part : part.replace(/[\w.+-]+@[\w.-]+\.[A-Za-z]+/g, m => 'x'.repeat(m.length))).join('')
         .replace(/(\x1b\]0;)([^\x07\x1b]*)(\x07|\x1b\\)/g, (_,start,title,end)=>start+title.replace(/[A-Za-z0-9]/g,'x')+end);
       for (const [name, raw] of Object.entries(chunks)) writeFileSync(join(folder, name + '.ansi'), redact(raw));
       writeFileSync(join(folder, 'capture.json'), JSON.stringify({ cliVersion: '0.162.1', capturedAt: new Date().toISOString(), cols: 200, rows: 50, elapsedMs: Date.now() - started, emailRedacted: true, titlesRedacted: true }, null, 2) + '\n');
