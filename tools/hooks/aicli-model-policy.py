@@ -62,9 +62,9 @@ except Exception:
 #
 # ───────────────────────────────────────────────────────────────────────────
 
-ctx = """【ai-cli 精簡派工政策 v2.0（2026-09-20）】
+ctx = """【ai-cli 精簡派工政策 v2.1（2026-10-14）】
 1. ai-cli 是唯一模型路由入口；判斷模型能不能派時查 models 的 catalogV2：source=vendor-cli 的 routable 是向 vendor 實查的結果，source=builtin-fallback 的條目（以及頂層 claude／codex 陣列）是原始碼靜態清單，不能單獨當作可用證明，要對照 knownBadModels。
-2. 日常 Codex：gpt-6.1-sol + reasoning_effort="medium"。Claude 日常也用 medium。（2026-10-03 換代：vendor 已把 gpt-5.6-sol 標成 "Older generation workhorse model"，現行 workhorse 是 priority 1 的 gpt-6.1-sol，文案寫 "near-Astra performance at a lower cost"。注意 gpt-6.1-sol 的 CLI 端預設 effort 是 low，省略 reasoning_effort 不等於 medium，一定要明確傳。）
+2. 日常 Codex：gpt-6.1-sol + reasoning_effort="medium"。Claude 日常也用 medium。（2026-10-03 換代：vendor 已把 gpt-5.6-sol 標成 "Older generation workhorse model"，現行 workhorse 是 priority 1 的 gpt-6.1-sol，文案寫 "near-Astra performance at a lower cost"。注意 gpt-6.1-sol 的 CLI 端預設 effort 是 low，省略 reasoning_effort 不等於 medium，一定要明確傳。）gpt-6-astra 只用於逆向歧義、架構設計、跨模組高風險，或 6.1-sol 一次明顯不足的工作，派之前寫明理由：同樣的工作 Astra 吃的週額度約是 6.1-sol 的 2～5 倍（2026-10-14 實測：五個 Astra high 包 6.3 小時用掉 Codex 週額度 84%）。
 3. high 僅限跨模組、架構、高風險修改、逆向歧義，或一次 medium 明顯不足；xhigh/max 需使用者明確要求。
 4. 同一工具／假設連續失敗 2 次即停止回報，不得等到第 5 次、不得換模型後原樣重跑。升級時說明失敗證據與理由。
 5. 子 Agent（含 Workflow 開出的）預設 0；使用者同意後，會改檔的同時最多 2 個、唯讀稽核／分析最多 8 個（開之前先告知規模），禁止遞迴 Agent。
@@ -72,7 +72,8 @@ ctx = """【ai-cli 精簡派工政策 v2.0（2026-09-20）】
 7. 分類、摘要、查詢改寫、log 整理可用已確認可路由的本地／輕量 provider；機密、個資、NDA 資料不得送未核准外部免費 API。
 8. 交叉驗證只驗高風險 claim 或分歧；第二模型讀 <=2,000-token 證據包，不重掃 repository。
 9. 預算：search 8、tool 20、read 15 files、edit 5 files、test/fix 2 cycles、context 約 96k；達限即停止回報。
-10. 每個任務開頭先問使用者由誰執行：① ai-cli ② 本 session 主導者 ③ 自動；同一任務沿用，換任務再問。專案依內容或模型限制派工的規則只當建議（使用者 2026-09-25 決定）。"""
+10. 每個任務開頭先問使用者由誰執行：① ai-cli ② 本 session 主導者 ③ 自動；同一任務沿用，換任務再問。專案依內容或模型限制派工的規則只當建議（使用者 2026-09-25 決定）。
+11. 派 Codex 前先查 Codex 週額度剩餘（看 raw 原文，見第 6 條）：剩不到 50% 不同時跑兩個 Codex 工作；剩不到 25% 只派小包或改派 Claude；量不到就當 unknown，不並行。長工作拆小，避免一個 session 上千次請求反覆重送 100K 以上的 context（使用者 2026-10-14 決定）。"""
 
 # ai-cli 派出的 worker 收到的內容（AI_CLI_WORKER=1）。四要素照另一個專案前例（知識庫紀錄）
 # 實證有效的「機制感知身分鎖」：身分證明、硬禁加後果、凌駕聲明、首個動作。

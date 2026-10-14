@@ -69,6 +69,7 @@
 
 ### 變更
 
+- **SessionStart 派工政策升為 v2.1（`tools/hooks/aicli-model-policy.py`，使用者 2026-10-14 決定）**：第 2 條補上 gpt-6-astra 只用於逆向歧義、架構設計、跨模組高風險或 6.1-sol 一次明顯不足的工作，派前寫明理由；新增第 11 條「派 Codex 前先查週額度剩餘：不到 50% 不同時跑兩個 Codex 工作，不到 25% 只派小包或改派 Claude，量不到當 unknown 不並行」。依據：2026-10-14 02:32～08:50 五個 Astra high 工作 6.3 小時用掉 Codex 週額度約 84%，按加權 token（未快取 1、快取 0.1、輸出 8）估算同樣工作 Astra 吃額度約 6.1-sol 的 2～5 倍（解析 `~/.codex/sessions` 的 token_usage_record／rate_limits；OpenAI 未公開計量公式，僅量級參考）。`~/.claude/scripts/aicli_model_policy.py` 同步，`verify-worker-guards`、`verify-worker-identity` 全綠。（Claude）
 - `npm test` 改由 `tools/run-tests.mjs` 依序執行，一支失敗不再跳過後面的（#14）。3.1.0 起 `test` 用 `&&` 串接、刻意 fail-fast，
   但這讓 CI 的一張紅燈只告訴你「第一個」壞掉的地方：#13 的 `verify-usage-parse` 一壞，排在後面的 15 支全被跳過、狀態不明。
   現在每一支都會跑，最後印彙總表（PASS／FAIL、耗時）；任何一支 FAIL（exit 非 0、被 signal 結束、spawn 失敗）整體仍 exit 1，CI 擋不擋的行為不變。
