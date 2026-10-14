@@ -1,6 +1,6 @@
 /**
  * Usage service — 查詢各 CLI agent 剩餘 token/quota。
- * 支援 Claude、Codex、agy（皆為 PTY）。Kiro 於 5.0.0 隨 agent 一起移除。
+ * 支援 Claude、Codex、agy；Codex 優先用 app-server RPC，其餘為 PTY。
  * 結果快取 120 秒，error 快取 30 秒。
  */
 
@@ -11,6 +11,7 @@ import { closeSync, existsSync, fstatSync, openSync, readdirSync, readSync, stat
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { stripAnsi } from '../core/ansi.js';
+import { readCodexAppServerUsage, readCodexCliVersion, stopCodexProcess } from './codex-app-server.js';
 
 const _patchRequire = createRequire(import.meta.url);
 let _ptyModule: any = null;
@@ -398,12 +399,33 @@ export function isCodexTuiReady(screen: string, idleMs: number): boolean {
   return /Ask Codex to do anything|\?\s*for shortcuts/i.test(tail);
 }
 
-// 送 /status 的按鍵。0.160 打 `/` 會開指令選單，跟文字同一次寫入的 Enter 會被吞掉，
-// 畫面只剩輸入框裡的 `›/status`——所以文字與 Enter 分兩次寫。重試時若 /status 還在輸入框，
-// 只補 Enter，不再打一次（否則變成 /status/status）。
+// 輸入是 renderTerminal 的畫面（含指令選單與底部狀態列），不能用 raw 尾端比對。
+// 只有輸入列回顯 /status 才回傳 Enter；沒回顯就只打字，不能依固定延遲按 Enter。
 export const CODEX_STATUS_ENTER_DELAY_MS = 500;
-export function codexStatusWrites(screenTail: string): string[] {
-  return /›\s*\/status\s*$/.test(screenTail.trimEnd()) ? ['\r'] : ['/status', '\r'];
+export function codexStatusWrites(screen: string): string[] {
+  return /^\s*›\s*\/status\s*$/m.test(screen) ? ['\r'] : ['/status'];
+}
+
+export const CODEX_TUI_TESTED_VERSIONS = ['0.162.1'] as const;
+
+/** 就緒只決定何時打字；收到回顯才送 Enter。最多重打一次，先 Ctrl-U 清掉未回顯的字。 */
+export function createCodexStatusHandshake() {
+  let typedAt: number | null = null, retried = false, enterAt: number | null = null, enters = 0;
+  return { next(screen: string, now: number, idleMs: number): string[] {
+    if (typedAt === null) {
+      if (!isCodexTuiReady(screen, idleMs)) return [];
+      typedAt = now;
+      return codexStatusWrites(screen);
+    }
+    const echo = codexStatusWrites(screen)[0] === '\r';
+    if (echo && (enterAt === null || now - enterAt > 2500) && enters < 2) {
+      enterAt = now; enters++; return ['\r'];
+    }
+    if (!echo && enterAt === null && !retried && now - typedAt > 10000) {
+      retried = true; return ['\x15/status'];
+    }
+    return [];
+  } };
 }
 
 export const CODEX_SESSION_RATE_LIMITS_MAX_AGE_MS = 10 * 60_000;
@@ -495,108 +517,133 @@ export function readCodexSessionPlan(codexHome: string): string | null {
 export class CodexUsageProvider {
   provider = 'codex';
   transport = 'pty';
-  constructor(private cliPath: string, private ptyFactory = _loadPtyModule) {}
+  constructor(private cliPath: string, private ptyFactory = _loadPtyModule, private readers: {
+    appServerRead?: typeof readCodexAppServerUsage;
+    sessionRead?: typeof readCodexSessionRateLimits;
+    versionRead?: typeof readCodexCliVersion;
+  } = {}) {}
 
   async query({ fresh = false }: { fresh?: boolean } = {}) {
-    // 有夠新的 session 檔就不開 TUI（瞬間、不受權限與信任畫面影響）。refresh=true 一律走 TUI。
-    if (!fresh) {
-      const fromFile = readCodexSessionRateLimits(_codexHome());
-      if (fromFile) return fromFile;
+    const fallbackReasons: string[] = [];
+    let cliVersion: string | null = null;
+    try {
+      return await (this.readers.appServerRead ?? readCodexAppServerUsage)(this.cliPath);
+    } catch (e) {
+      cliVersion = (e as { cliVersion?: string })?.cliVersion ?? null;
+      fallbackReasons.push(`app-server: ${_errMsg(e)}`);
     }
+    // 只有非 fresh 才能用最多 10 分鐘的 session 快照。
+    if (!fresh) {
+      try {
+        const fromFile = (this.readers.sessionRead ?? readCodexSessionRateLimits)(_codexHome());
+        if (fromFile) return { ...fromFile, cliVersion, fallbackReasons };
+        fallbackReasons.push('session-file: no recent valid quota event');
+      } catch (e) { fallbackReasons.push(`session-file: ${_errMsg(e)}`); }
+    }
+    if (!cliVersion) cliVersion = await (this.readers.versionRead ?? readCodexCliVersion)(this.cliPath).catch(() => null);
+    const metadata = {
+      source: 'tui', cliVersion, fallbackReasons,
+      ...(cliVersion && (CODEX_TUI_TESTED_VERSIONS as readonly string[]).includes(cliVersion) ? {} : {
+        warnings: [`Codex TUI ${cliVersion ?? 'unknown version'} has not been verified; tested: ${CODEX_TUI_TESTED_VERSIONS.join(', ')}`],
+      }),
+    };
     // 先帶參數、不認得才拿掉重跑一次：新版不多付一次啟動成本，也不必另外 spawn `codex --help`
     // （cliPath 在 Windows 常是 .cmd shim，PTY 吃得下、child_process 直接 spawn 吃不下）。
-    let result = await this._run(CODEX_USAGE_ARGS);
-    if (isCodexNoDaemonUnsupported(result.output)) result = await this._run(CODEX_UPDATE_ARGS);
+    let result: PtyRunResult;
+    try {
+      result = await this._run(CODEX_USAGE_ARGS);
+      if (isCodexNoDaemonUnsupported(result.output)) result = await this._run(CODEX_UPDATE_ARGS);
+    } catch (e) {
+      fallbackReasons.push(`tui: ${_errMsg(e)}`);
+      return { type: 'error', error: _errMsg(e), raw: '', ...metadata };
+    }
     if (result.error) {
-      if (hasUpdatePrompt(result.output)) { const fromFile = readCodexSessionRateLimits(_codexHome()); if (fromFile) return fromFile; }
-      throw new Error(result.error);
+      fallbackReasons.push(`tui: ${result.error}`);
+      return { type: 'error', error: result.error, raw: _cleanUsageText(renderTerminal(result.output)), ...metadata };
     }
     const text = _cleanUsageText(renderTerminal(result.output));
-    if (!text) throw new Error('codex usage: no output');
     const usage = parseCodexUsage(text);
     // 沒抓到額度面板也沒錯誤字樣（例：被 hook 信任等互動畫面擋住、/status 送不進去）：同樣是 unknown。
-    if (usage.type === 'raw') {
-      return { ...usage, type: 'error', error: `no quota panel in output${result.timedOut ? ' (timed out after 60s)' : ''}` };
+    if (usage.type !== 'rate_limits') {
+      const error = usage.type === 'error' ? usage.error : `no quota panel in output${result.timedOut ? ' (timed out after 60s)' : ''}`;
+      fallbackReasons.push(`tui: ${error}`);
+      return { ...usage, type: 'error', error, ...metadata };
     }
     // 0.160 的 /status 面板沒有方案欄位；方案不常變，從最近的 session 檔補（不設時間限制）。
     if (usage.type === 'rate_limits' && !usage.plan) {
       const plan = readCodexSessionPlan(_codexHome());
-      if (plan) return { ...usage, plan };
+      if (plan) return { ...usage, plan, ...metadata };
     }
-    return usage;
+    return { ...usage, ...metadata };
   }
 
-  // Codex 啟動時會 booting MCP servers，model 框會先閃現真實模型再退回 "loading"，
-  // 數秒後才穩定；若太早送 /status 會被吃掉。因此等輸出靜止(quiescence)再送，
-  // 並在面板未出現時重試。
+  // TUI 是最後手段：就緒提示只決定打字時機，送 Enter 必須先看到畫面回顯。
   private _run(args: string[]): Promise<PtyRunResult> {
     return new Promise((resolve, reject) => {
       let ptyProc: any;
       try {
         const pty = this.ptyFactory();
         // 在 homedir 啟動，盡量避免專案層級 MCP server 拖慢開機
-        ptyProc = pty.spawn(this.cliPath, args, { name: 'xterm-color', cols: 200, rows: 50, cwd: homedir(), env: buildWorkerEnv() });
+        ptyProc = pty.spawn(this.cliPath, args, {
+          name: 'xterm-color', cols: 200, rows: 50, cwd: homedir(), env: buildWorkerEnv(),
+        });
       } catch (e) { reject(e); return; }
       if (!ptyProc?.pid) { try { ptyProc?.kill?.(); } catch {} reject(new Error('codex pty.spawn returned no pid')); return; }
 
-      let output = '', timedOut = false, settled = false, sent = false, sends = 0;
-      let lastDataAt = Date.now(), lastSendAt = 0;
+      let output = '', timedOut = false, settled = false;
+      let lastDataAt = Date.now();
+      const handshake = createCodexStatusHandshake();
+      let exited = false, ptyClosed = false;
       let pollT: ReturnType<typeof setTimeout> | null = null;
       let hardKillT: ReturnType<typeof setTimeout> | null = null;
       const clearPoll = () => { if (pollT) { clearTimeout(pollT); pollT = null; } };
       const cleanup = () => { clearPoll(); if (hardKillT) { clearTimeout(hardKillT); hardKillT = null; } };
-      const kill = () => {
-        const pid = ptyProc?.pid;
+      const closePty = () => {
+        if (ptyClosed) return;
+        ptyClosed = true;
         try { ptyProc.kill(); } catch {}
-        // codex 會 fork 多個子程序（MCP servers），ptyProc.kill 未必收得掉整棵樹；
-        // Windows 上用 taskkill /T 連同子孫一起終止，只針對本次 spawn 的 pid，不影響其他 codex。
-        if (pid && process.platform === 'win32') {
-          try { spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', shell: false }).on('error', () => {}); } catch {}
-        }
-        // 保險：若 graceful kill 沒讓進程退出，1 秒後再強制 SIGKILL
-        setTimeout(() => { try { ptyProc.kill('SIGKILL'); } catch {} }, 1000);
+      };
+      const kill = async () => {
+        // onExit 後不再 taskkill：root PID 可能被其他行程重用。
+        if (exited) return;
+        // PTY 原生模式須先 dispose 自己的 pipe worker；重入 kill 會再啟動 console-list helper。
+        closePty();
+        if (exited) return;
+        // adapter 只使用此次 spawn 的 PID 與自己的 PTY handle。
+        const owned = { pid: ptyProc.pid, exitCode: null, signalCode: null, kill: () => { closePty(); return true; } };
+        try { await stopCodexProcess(owned as ReturnType<typeof spawn>); }
+        catch { /* closePty 已呼叫，清理不能阻止回傳額度 */ }
       };
       const settle = (v: PtyRunResult) => {
-        if (settled) return; settled = true; cleanup(); kill(); resolve(v);
+        if (settled) return; settled = true; cleanup(); void kill().then(() => resolve(v));
       };
 
-      const strip = (x: string) => x.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '').replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '');
-      const panelRe = /(?:5h|weekly|rate)\s*limit|%\s*(?:left|used)|resets?\s+\d{1,2}:\d{2}|\d+%\s*context\s+left/i;
       const guardUpdate = () => {
         if (!hasUpdatePrompt(output)) return false;
         settle({ output, exitCode: null, signal: null, timedOut: false, error: 'codex usage: update prompt detected; automatic keys cancelled' }); return true;
-      };
-      const sendStatus = () => {
-        if (settled || guardUpdate()) return;
-        sent = true; sends++; lastSendAt = Date.now();
-        const [first, ...rest] = codexStatusWrites(strip(output).slice(-400));
-        try { ptyProc.write(first); } catch {}
-        for (const keys of rest) setTimeout(() => { if (!settled && !guardUpdate()) { try { ptyProc.write(keys); } catch {} } }, CODEX_STATUS_ENTER_DELAY_MS);
       };
 
       hardKillT = setTimeout(() => { timedOut = true; settle({ output, exitCode: null, signal: null, timedOut }); }, 60_000);
 
       ptyProc.onData((d: string) => { output += d; lastDataAt = Date.now(); guardUpdate(); });
-      ptyProc.onExit(({ exitCode, signal }: { exitCode: number; signal: string }) => settle({ output, exitCode, signal, timedOut }));
+      ptyProc.onExit(({ exitCode, signal }: { exitCode: number; signal: string }) => { exited = true; settle({ output, exitCode, signal, timedOut }); });
 
       const poll = () => {
         pollT = null;
         if (settled) return;
-        const s = strip(output);
+        if (guardUpdate()) return;
+        const s = renderTerminal(output);
         const idleMs = Date.now() - lastDataAt;
-
-        if (!sent) {
-          if (isCodexTuiReady(s, idleMs)) sendStatus();
-        } else if (!panelRe.test(s)) {
-          // 重試以「距上次送出」計時，避免畫面持續刷新時 idleMs 偏低而永遠不重試
-          if (sends < 3 && Date.now() - lastSendAt > 2500) sendStatus();
-          else if (sends >= 3 && idleMs > 2000) {
-            // Codex 未輸出 rate limit 面板，快速 settle 避免等到 60s hardKillT
-            settle({ output, exitCode: null, signal: null, timedOut: false }); return;
-          }
-        } else {
+        if (parseCodexUsage(output).type === 'rate_limits') {
           // 面板已出現：等輸出靜止再擷取，確保 5h 與 weekly 兩行都到齊
           if (idleMs > 800) { settle({ output, exitCode: null, signal: null, timedOut: false }); return; }
+        } else {
+          for (const keys of handshake.next(s, Date.now(), idleMs)) {
+            if (settled || guardUpdate()) return;
+            try { ptyProc.write(keys); } catch (e) {
+              settle({ output, exitCode: null, signal: null, timedOut, error: `codex usage stdin: ${_errMsg(e)}` }); return;
+            }
+          }
         }
         pollT = setTimeout(poll, 250);
       };
@@ -759,7 +806,8 @@ function _cacheInfo(hit: boolean, ageMs: number, ttlMs: number) {
 }
 
 function _makeResult(provider: string, status: string, usage: unknown, error: string | null, ttlMs: number) {
-  return { provider, transport: 'pty', status, cache: _cacheInfo(false, 0, ttlMs), usage, error };
+  const transport = provider === 'codex' && (usage as { source?: string })?.source === 'app-server' ? 'stdio' : 'pty';
+  return { provider, transport, status, cache: _cacheInfo(false, 0, ttlMs), usage, error };
 }
 
 function _errMsg(e: unknown): string {

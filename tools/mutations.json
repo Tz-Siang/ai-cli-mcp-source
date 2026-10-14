@@ -830,8 +830,8 @@
   {
     "name": "沒抓到額度面板仍回 ok（卡在互動畫面、逾時的假綠燈）",
     "file": "src/plugins/usage-service.ts",
-    "from": "    if (usage.type === 'raw') {",
-    "to": "    if (usage.type === 'raw' && false) {",
+    "from": "    if (usage.type !== 'rate_limits') {",
+    "to": "    if (usage.type === 'error') {",
     "expect": "沒抓到額度面板（卡在互動畫面、逾時）時 status 不是 ok",
     "script": "verify-usage-parse.mjs"
   },
@@ -1054,16 +1054,16 @@
   {
     "name": "/status 與 Enter 同一次寫入（Enter 被指令選單吞掉）",
     "file": "src/plugins/usage-service.ts",
-    "from": "  return /›\\s*\\/status\\s*$/.test(screenTail.trimEnd()) ? ['\\r'] : ['/status', '\\r'];",
-    "to": "  return /›\\s*\\/status\\s*$/.test(screenTail.trimEnd()) ? ['\\r'] : ['/status\\r'];",
+    "from": "  return /^\\s*›\\s*\\/status\\s*$/m.test(screen) ? ['\\r'] : ['/status'];",
+    "to": "  return ['/status\\r'];",
     "expect": "/status 與 Enter 分兩次寫",
     "script": "verify-usage-parse.mjs"
   },
   {
     "name": "重試時再打一次 /status（輸入框變成 /status/status）",
     "file": "src/plugins/usage-service.ts",
-    "from": "  return /›\\s*\\/status\\s*$/.test(screenTail.trimEnd()) ? ['\\r'] : ['/status', '\\r'];",
-    "to": "  return ['/status', '\\r'];",
+    "from": "  return /^\\s*›\\s*\\/status\\s*$/m.test(screen) ? ['\\r'] : ['/status'];",
+    "to": "  return ['/status'];",
     "expect": "重試時 /status 還在輸入框，只補 Enter",
     "script": "verify-usage-parse.mjs"
   },
@@ -1181,8 +1181,8 @@
   },
   {
     "name": "codex query 不先播放畫面就清 ANSI（解析器拿到的已經黏在一起）",
-    "from": "    const text = _cleanUsageText(renderTerminal(result.output));\n    if (!text) throw new Error('codex usage: no output');",
-    "to": "    const text = _cleanUsageText(result.output);\n    if (!text) throw new Error('codex usage: no output');",
+    "from": "    const text = _cleanUsageText(renderTerminal(result.output));\n    const usage = parseCodexUsage(text);",
+    "to": "    const text = _cleanUsageText(result.output);\n    const usage = parseCodexUsage(text);",
     "expect": "經過 query 的完整路徑",
     "file": "src/plugins/usage-service.ts",
     "script": "verify-usage-parse.mjs"
@@ -1253,7 +1253,7 @@
   },
   {
     "name": "有新鮮的 session 檔仍開 TUI（白等十幾秒）",
-    "from": "      if (fromFile) return fromFile;",
+    "from": "        if (fromFile) return { ...fromFile, cliVersion, fallbackReasons };",
     "to": "",
     "expect": "有新鮮的 session 檔時不開 TUI",
     "file": "src/plugins/usage-service.ts",
@@ -1269,7 +1269,7 @@
   },
   {
     "name": "TUI 結果不從 session 檔補 plan",
-    "from": "      if (plan) return { ...usage, plan };",
+    "from": "      if (plan) return { ...usage, plan, ...metadata };",
     "to": "",
     "expect": "從 session 檔補 plan",
     "file": "src/plugins/usage-service.ts",
@@ -2781,5 +2781,61 @@
     "from": "if (unlisted.length > 0) {",
     "to": "if (false) {",
     "expect": "有未列入清單的 verify-*.mjs 時報錯 exit 1"
+  },
+  {
+    "name": "RPC 已用與剩餘互換",
+    "file": "src/plugins/codex-app-server.ts",
+    "from": "      percentUsed: w.usedPercent,",
+    "to": "      percentUsed: 100 - w.usedPercent,",
+    "expect": "RPC used and remaining semantics",
+    "script": "verify-codex-app-server.mjs"
+  },
+  {
+    "name": "RPC 失敗 fallback 沒額度仍回 ok",
+    "file": "src/plugins/usage-service.ts",
+    "from": "      return { ...usage, type: 'error', error, ...metadata };",
+    "to": "      return { ...usage, type: 'rate_limits', error, ...metadata };",
+    "expect": "RPC failure must never return ok without quota",
+    "script": "verify-codex-app-server.mjs"
+  },
+  {
+    "name": "TUI 回顯前直接 Enter",
+    "file": "src/plugins/usage-service.ts",
+    "from": "      return codexStatusWrites(screen);",
+    "to": "      return ['/status', '\\r'];",
+    "expect": "TUI handshake retries once and clears pending input",
+    "script": "verify-codex-app-server.mjs"
+  },
+  {
+    "name": "TUI 用 raw 尾端判斷回顯",
+    "file": "src/plugins/usage-service.ts",
+    "from": "  return /^\\s*›\\s*\\/status\\s*$/m.test(screen) ? ['\\r'] : ['/status'];",
+    "to": "  return /›\\s*\\/status\\s*$/.test(screen.slice(-400).trimEnd()) ? ['\\r'] : ['/status'];",
+    "expect": "TUI waits for rendered status echo",
+    "script": "verify-codex-app-server.mjs"
+  },
+  {
+    "name": "RPC notifications 也當 JSON response",
+    "file": "src/plugins/codex-app-server.ts",
+    "from": "          if (msg.id !== (initialized ? 2 : 1)) continue; // notifications and unrelated messages",
+    "to": "          if (msg.id !== (initialized ? 2 : 1)) { fail(\"unexpected notification\"); return; }",
+    "expect": "RPC initialize notification and split JSON frames",
+    "script": "verify-codex-app-server.mjs"
+  },
+  {
+    "name": "RPC 失敗 fresh 仍用 session 快照",
+    "file": "src/plugins/usage-service.ts",
+    "from": "    if (!fresh) {",
+    "to": "    if (true) {",
+    "expect": "RPC fallback order and reasons",
+    "script": "verify-codex-app-server.mjs"
+  },
+  {
+    "name": "TUI PTY kill 重入",
+    "file": "src/plugins/usage-service.ts",
+    "from": "        ptyClosed = true;\n        try { ptyProc.kill(); } catch {}",
+    "to": "        ptyClosed = true;\n        try { ptyProc.kill(); } catch {}\n        try { ptyProc.kill(); } catch {}",
+    "expect": "TUI provider waits echo and closes owned PTY once",
+    "script": "verify-codex-app-server.mjs"
   }
 ]

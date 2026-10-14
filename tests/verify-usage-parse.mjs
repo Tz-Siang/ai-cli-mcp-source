@@ -42,7 +42,7 @@ const { parseCodexUsage, parseClaudeUsage, parseAgyUsage, renderTerminal, readCo
 /** 假 PTY：依序吐出 outputs，並記下每次啟動帶的參數。 */
 class FakeCodex extends CodexUsageProvider {
   constructor(outputs) {
-    super('codex');
+    super('codex', undefined, { appServerRead: async () => { throw new Error('stub: RPC unsupported'); }, versionRead: async () => '0.162.1' });
     this.outputs = [...outputs];
     this.calls = [];
   }
@@ -176,8 +176,8 @@ check(!isCodexTuiReady(`${TUI_0160_READY}\nBooting MCP server: knowledge`, 2000)
 check(isCodexTuiReady('╭──╮\n│ model:     gpt-6-astra   │\n╰──╯\n', 2000), '舊版 TUI：標題框換成真模型名仍算就緒');
 
 check(
-  JSON.stringify(codexStatusWrites(TUI_0160_READY)) === JSON.stringify(['/status', '\r']),
-  '★ /status 與 Enter 分兩次寫（同一次寫入時 Enter 會被指令選單吞掉）',
+  JSON.stringify(codexStatusWrites(TUI_0160_READY)) === JSON.stringify(['/status']),
+  '★ /status 與 Enter 分兩次寫，先等回顯（同一次寫入時 Enter 會被指令選單吞掉）',
   `得到 ${JSON.stringify(codexStatusWrites(TUI_0160_READY))}`
 );
 check(
@@ -348,7 +348,7 @@ const quickResult = await quick.query();
 check(quick.calls.length === 0 && quickResult?.source === 'session-file', '★ 有新鮮的 session 檔時不開 TUI', `啟動 ${quick.calls.length} 次、source=${quickResult?.source}`);
 const forced = new FakeCodex([RATE_PANEL]);
 const forcedResult = await forced.query({ fresh: true });
-check(forced.calls.length === 1 && forcedResult?.type === 'rate_limits' && forcedResult?.source === undefined, 'refresh=true 一律走 TUI', `啟動 ${forced.calls.length} 次`);
+check(forced.calls.length === 1 && forcedResult?.type === 'rate_limits' && forcedResult?.source === 'tui', 'RPC 失敗後 refresh=true 跳過 session、走 TUI', `啟動 ${forced.calls.length} 次`);
 check(forcedResult?.plan === 'prolite', 'TUI 面板沒有方案時，從 session 檔補 plan', `得到 ${JSON.stringify(forcedResult?.plan)}`);
 const svcFresh = new UsageService({});
 const svcFake = new FakeCodex([RATE_PANEL]);

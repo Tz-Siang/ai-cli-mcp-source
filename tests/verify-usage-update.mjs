@@ -8,9 +8,10 @@ import { CodexUsageProvider, ClaudeUsageProvider, UsageService, hasUpdatePrompt 
 
 // PTY 與 taskkill 全用 stub；任何真 CLI／OS kill 都不能由這支測試觸發。
 const cp = createRequire(import.meta.url)('node:child_process'), originalSpawn = cp.spawn;
-cp.spawn = (file) => { assert.equal(file, 'taskkill'); return new EventEmitter(); };
+cp.spawn = (file) => { assert.equal(file, 'taskkill'); const e = new EventEmitter(); queueMicrotask(() => e.emit('close', 0)); return e; };
 syncBuiltinESMExports();
 let passed = 0;
+const rpcFailure = { appServerRead: async () => { throw new Error('stub RPC unsupported'); }, versionRead: async () => '0.162.1' };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 async function test(name, fn) { try { await fn(); console.log('PASS ' + name); passed++; } catch (e) { console.error('FAIL ' + name); throw e; } }
 function ptyStub(chunks, onWrite) {
@@ -25,7 +26,7 @@ async function query(provider, key) { const service = new UsageService({}); serv
 try {
   await test('PTY update prompt blocks Codex keys with explicit error and startup flag', async () => {
     const fake = ptyStub([[0, '✨ Update available! 0.160.1 -> 0.162.0\n❯ Update now\nPress Enter to continue']]);
-    const result = await query(new CodexUsageProvider('codex-stub', fake.factory), 'codex');
+    const result = await query(new CodexUsageProvider('codex-stub', fake.factory, rpcFailure), 'codex');
     assert.equal(result.status, 'error'); assert.match(result.error, /update prompt detected/);
     assert.deepEqual(fake.writes, []); assert(fake.killed);
     assert(fake.calls[0].args.includes('check_for_update_on_startup=false'));
@@ -40,7 +41,7 @@ try {
     let deliver; const writes = []; const fake = { spawn: () => ({ pid: 2147483647, kill() {},
       onExit() {}, onData(fn) { deliver = fn; fn('model: gpt-6-sol\n❯'); },
       write(keys) { writes.push(keys); if (!keys.includes('\r')) deliver('\n✨ Update available!\n❯ Update now\n  Skip update'); } }) };
-    const result = await query(new CodexUsageProvider('codex-stub', () => fake), 'codex');
+    const result = await query(new CodexUsageProvider('codex-stub', () => fake, rpcFailure), 'codex');
     assert.equal(result.status, 'error'); await sleep(400);
     assert.ok(writes.length === 1); assert(!writes.some(k => k.includes('\r')));
   });
@@ -52,14 +53,15 @@ try {
     assert(!hasUpdatePrompt('Claude Code v2.1.0\n/status\nAccount: Pro\nWeekly limit: 90% left (resets 10:00)'));
     assert(!hasUpdatePrompt('Weekly limit: 90% left (resets 10:00)'));
   });
-  await test('M6 blocked Codex refresh falls back to recent session quota', async () => {
+  await test('M6 blocked Codex refresh rejects stale fallback and sends no keys', async () => {
     const now = new Date(), root = join(process.env.CODEX_HOME, 'sessions'), dir = join(root, String(now.getFullYear()), String(now.getMonth() + 1).padStart(2, '0'), String(now.getDate()).padStart(2, '0'));
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, 'stub.jsonl'), JSON.stringify({ timestamp: now.toISOString(), payload: { type: 'token_count', rate_limits: { primary: { used_percent: 21, window_minutes: 10080, resets_at: Math.floor(Date.now() / 1000) + 3600 }, plan_type: 'pro' } } }) + '\n');
     try {
       const fake = ptyStub([[0, 'Update available!\n❯ Update now\n  Skip update']]);
-      const result = await new CodexUsageProvider('codex-stub', fake.factory).query({ fresh: true });
-      assert.equal(result.source, 'session-file'); assert.equal(result.weekly.percentUsed, 21); assert.deepEqual(fake.writes, []);
+      const result = await new CodexUsageProvider('codex-stub', fake.factory, rpcFailure).query({ fresh: true });
+      assert.equal(result.type, 'error'); assert.equal(result.source, 'tui'); assert.deepEqual(fake.writes, []);
+      assert.match(result.fallbackReasons.join(' '), /update prompt detected/);
     } finally { rmSync(join(dir, 'stub.jsonl')); }
   });
 } finally { cp.spawn = originalSpawn; syncBuiltinESMExports(); }

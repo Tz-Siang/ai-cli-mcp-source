@@ -510,6 +510,8 @@ Use MCP `get_result` with both `pid` and `jobId` to read an older retained resul
 TTY `jobs --watch` uses the alternate screen and restores the cursor/screen on exit;
 non-TTY and JSON watch output remains append-only.
 
+Codex `query_usage` reads live quota via `codex app-server` stdio JSON-RPC first, for both fresh and non-fresh queries. It does not create a thread or spend model tokens. On RPC failure, non-fresh queries may use a session event up to 10 minutes old; otherwise the final fallback opens the TUI. `/status` must echo in the rendered input line before Enter is sent. Existing 120-second service caching remains; `refresh=true` bypasses that cache. Results include `source`, `asOf` (RPC/session), `cliVersion`, failure `fallbackReasons`, and warnings for untested TUI versions (tested: 0.162.1). RPC quota windows include used/remaining percentages, readable `resetAt`, ISO `resetAtIso`, plan, reset credits, and a readable `raw` summary. Missing quota always returns error.
+
 `query_usage` launches Codex with `-c check_for_update_on_startup=false`, including
 its fallback without `--no-daemon`. Codex and Claude update prompts stop automated
 keys and return an error. This does not alter the user's global configuration.
