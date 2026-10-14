@@ -737,6 +737,8 @@ macOS 用 `ps` 查身分；拿不到身分資料時不得據此接回或殺行�
 MCP `get_result` 可同時給 `pid` 與 `jobId`，讀取較舊的保留結果。
 TTY `jobs --watch` 使用替代畫面，離開時還原游標與畫面；非 TTY／JSON 仍逐次輸出。
 
+Codex 的 `query_usage` 不論 fresh 與否，都先用 `codex app-server` stdio JSON-RPC 即時讀取額度，不建立 thread、不消耗模型 token。RPC 失敗時，非 fresh 可退回 10 分鐘內的 session 事件，最後才開 TUI；`/status` 必須在渲染後的輸入列回顯才送 Enter。服務原有 120 秒快取仍保留，`refresh=true` 跳過快取。結果附 `source`、`asOf`（RPC／session）、`cliVersion`、`fallbackReasons`，未實測版本落到 TUI 時附 `warnings`（目前實測 0.162.1）。RPC 視窗提供已用／剩餘百分比、可讀的 `resetAt` 與 ISO `resetAtIso`、方案、重置 credits 與可讀 `raw` 摘要；沒有額度時一定回 error。
+
 `query_usage` 啟動 Codex 時帶 `-c check_for_update_on_startup=false`，
 拿掉 `--no-daemon` 的退路也保留這個設定。Codex／Claude 出現更新提示時，
 自動按鍵即停止並回錯誤；不修改使用者的全域設定。

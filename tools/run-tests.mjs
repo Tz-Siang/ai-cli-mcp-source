@@ -45,6 +45,8 @@ const TESTS = [
   'verify-catalog-source.mjs',
   'verify-agy-parse.mjs',
   'verify-usage-parse.mjs',
+  'verify-codex-app-server.mjs',
+  'verify-codex-usage-schema.mjs',
   'verify-job-usage.mjs',
   'verify-exec-contract.mjs',
   'verify-mcp-capabilities.mjs',

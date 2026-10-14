@@ -10,6 +10,8 @@
 
 ### 修復
 
+- Codex `query_usage` 優先透過 app-server JSON-RPC 即時讀額度，不再依賴刮 TUI；Windows npm shim 以 Node／JS 參數陣列啟動。失敗依 fresh 決定 session fallback，保留逐層原因與版本預警；TUI 等 `/status` 回顯才按 Enter，最多清空重打一次，讀不到額度一定回 error。新增 RPC／0.162.1 原始 ANSI 回歸、schema 檢查及突變驗證，README 同步說明。（Codex）
+
 - Windows 上 Claude Code 結束時，若 MCP server 在 stdin 關閉後 300ms 內未退出，
   會終止 server 的整棵行程樹，先前連 Claude／Codex／Grok／agy 的持久化 job 也會被殺掉。
   現在 runner 由短命 launcher 啟動，離開 server 的行程樹後才派 worker，job 可繼續執行與接管。（Codex）
