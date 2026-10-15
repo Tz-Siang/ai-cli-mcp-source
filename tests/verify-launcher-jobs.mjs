@@ -117,7 +117,7 @@ function assertRunnerFailed(target, pattern) {
 try {
   await test('Windows launcher returns runner PID and exits for pipe and PTY', async () => {
     a = await client();
-    for (const model of ['gpt-5.5', 'agy-default']) jobs.push(await dispatch(a, model));
+    for (const model of ['gpt-6.1-sol', 'agy-default']) jobs.push(await dispatch(a, model));
     const ids = await lookupIdentities(jobs.flatMap(job => [job.pid, job.meta.worker.pid]));
     for (const job of jobs) {
       const launch = json(join(job.dir, 'launcher.json'));
@@ -171,7 +171,7 @@ try {
     for (const fault of ['no-pid', 'timeout', 'spawn', 'runner-spawn', 'invalid-pid']) {
       const c = await client(fault), existing = new Set(readdirSync(join(state, 'jobs')));
       try {
-        await assert.rejects(c.call('run', { model: 'gpt-5.5', prompt: JSON.stringify({ delay: 100 }), workFolder: ROOT }), /launcher|ENOENT|runner/i);
+        await assert.rejects(c.call('run', { model: 'gpt-6.1-sol', prompt: JSON.stringify({ delay: 100 }), workFolder: ROOT }), /launcher|ENOENT|runner/i);
         const dir = readdirSync(join(state, 'jobs')).filter(id => !existing.has(id)).map(id => join(state, 'jobs', id));
         assert.equal(dir.length, 1); const exit = json(join(dir[0], 'exit.json'));
         assert.equal(exit.exitCode, 1); assert.equal(exit.killed, false); assert.equal(exit.timedOut, false); assert.ok(exit.error);
@@ -185,7 +185,7 @@ try {
   await test('Windows launcher.ready write failure fails run and leaves no running job', async () => {
     const c = await client('ready-write'), existing = new Set(readdirSync(join(state, 'jobs')));
     try {
-      await assert.rejects(c.call('run', { model: 'gpt-5.5', prompt: JSON.stringify({ delay: 100 }), workFolder: ROOT }), /injected launcher\.ready write failure/);
+      await assert.rejects(c.call('run', { model: 'gpt-6.1-sol', prompt: JSON.stringify({ delay: 100 }), workFolder: ROOT }), /injected launcher\.ready write failure/);
       const [jobId] = readdirSync(join(state, 'jobs')).filter(id => !existing.has(id)), dir = join(state, 'jobs', jobId);
       const pid = json(join(dir, 'launcher.json')).pid; runners.add(pid); await ownPid(pid);
       const exit = json(join(dir, 'exit.json')); assert.equal(exit.exitCode, 1); assert.match(exit.error, /launcher\.ready/);

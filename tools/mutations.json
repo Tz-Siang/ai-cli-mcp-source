@@ -726,8 +726,8 @@
   {
     "name": "已下架的 gpt-5.4 被加回清單（又開始當候選廣告出去）",
     "file": "src/agents/codex.ts",
-    "from": "  'gpt-5.5',",
-    "to": "  'gpt-5.5',\n  'gpt-5.4',",
+    "from": "  'gpt-5.6-luna',",
+    "to": "  'gpt-5.6-luna',\n  'gpt-5.4',",
     "expect": "gpt-5.4 已不在已知模型清單",
     "script": "verify-alias-config.mjs"
   },

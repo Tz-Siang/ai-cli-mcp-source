@@ -123,7 +123,7 @@ async function mcpChecks() {
   try {
     await send('initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'verify-liveness', version: '1' } });
     child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' })}\n`);
-    const run = decode(await call('run', { model: 'gpt-5.5', prompt: 'Reply PONG', workFolder: ROOT }));
+    const run = decode(await call('run', { model: 'gpt-6.1-sol', prompt: 'Reply PONG', workFolder: ROOT }));
     pid = run?.pid;
     check('MCP run uses codex stub', Number.isSafeInteger(pid) && run.agent === 'codex', JSON.stringify(run));
     if (!pid) return;
@@ -179,7 +179,7 @@ async function fileChecks(FileProcessService) {
   const stateDir = join(TEMP, 'state');
   const options = { stateDir, cliPaths: { codex: stub } };
   const service = new FileProcessService(options);
-  const run = await service.startProcess({ cwd: ROOT, model: 'gpt-5.5', prompt: 'Reply PONG' });
+  const run = await service.startProcess({ cwd: ROOT, model: 'gpt-6.1-sol', prompt: 'Reply PONG' });
   // 刻意換一個 service：不能只靠寫入端的記憶體計數。
   const reader = new FileProcessService(options);
   try {
@@ -290,7 +290,7 @@ async function edgeChecks(ProcessService, FileProcessService, buildLiveness, emp
   check('File disappeared without report stays lost', lost.status === 'lost' && !('liveness' in lost));
 
   const service = new ProcessService({ cliPaths: { codex: stub, claude: stub, antigravity: stub } });
-  const run = await service.startProcess({ model: 'gpt-5.5', prompt: 'Memory counters', workFolder: ROOT });
+  const run = await service.startProcess({ model: 'gpt-6.1-sol', prompt: 'Memory counters', workFolder: ROOT });
   const entry = service.findProcess(run.pid);
   try {
     const originalListeners = entry.process.listenerCount('close');

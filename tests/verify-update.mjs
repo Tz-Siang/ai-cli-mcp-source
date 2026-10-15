@@ -273,7 +273,7 @@ try {
     try {
       const doctor = await server.call('doctor');
       check('MCP doctor 有 update.notice', doctor.update?.notice === notice && doctor.update.policy === 'off');
-      const run = await server.call('run', { prompt: 'Reply PONG', model: 'gpt-5.5', workFolder: f.a }); pid = run.pid;
+      const run = await server.call('run', { prompt: 'Reply PONG', model: 'gpt-6.1-sol', workFolder: f.a }); pid = run.pid;
       check('MCP run 啟動回傳 updateNotice', run.updateNotice === notice && Number.isSafeInteger(pid) && run.status === 'started' && typeof run.message === 'string', JSON.stringify(run));
       const models = await server.call('models');
       check('MCP models payload 含 updateNotice', models.updateNotice === notice);

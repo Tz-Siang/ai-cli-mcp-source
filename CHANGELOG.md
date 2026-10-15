@@ -93,6 +93,39 @@
 - README 章節重排：兩份 README 改為簡介 → 快速開始 → 掛到 Claude Code → 各 agent（Grok CLI、direct-api）→ 自動更新 → 其餘進階章節，新讀者不再一開頭就撞上 Grok 的內部驗收細節。Grok 唯讀旗標與 F2 實機驗證點、重啟接回驗收指令這些維護者驗收內容移到 `tools/acceptance/README.md`，README 原處留連結；`package.json` 的 description 補上 Grok、keywords 加 `grok`。（Claude）
 - README「自動更新」補上信任模型一節（#15）：`on` 等於信任 `origin` 上的每一次 push——能 push 的人或盜用帳號／token 的人，都能讓所有原始碼安裝在下一輪檢查時執行他們的程式碼；新程式碼在背景 `npm install`（含 lifecycle scripts）、build 與 `doctor` 煙霧測試時就已執行，不是等到下次啟動，而 `run` 預設以各家的權限略過旗標啟動 agent。建議只在信任 `origin` 寫入者的機器用 `on`，其他用 `check`。預設值不變：這次只把風險寫清楚，改預設或改成只套用簽章版本留待日後再議。（Claude）
 
+### 移除（已退役的 gpt-5.5）
+
+- **`gpt-5.5` 移出 codex 候選清單**：vendor 在 6.3.0 時就標明它 2026-10-14T19:00Z 退役，
+  替代模型是 `gpt-6.1-sol`。2026-10-15 退役後重查，codex-cli 0.162.1 的目錄裡已經沒有它。
+  - 目錄怎麼讀的：`~/.codex/models_cache.json` 一開始是 `client_version` 0.162.0 寫的
+    （和 `codex --version` 0.162.1 不符，是另一支 codex 的視角，紅線 9）。先派一個 `gpt-6.1-sol`
+    trivial job 讓 0.162.1 自己重抓，`client_version` 變成 0.162.1 才讀。結果是 9 筆，沒有 `gpt-5.5`，
+    其中對外列出的 7 筆和 `CODEX_MODELS` 一致。`gpt-reserve`、`codex-auto-review` 仍是 `visibility: "hide"`，照舊不收。
+  - 退役後指名 `gpt-5.5`（effort `medium`）實測一個 trivial job：exitCode 1，原文——
+    CLI：``Model metadata for `gpt-5.5` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.``
+    API：`{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"The 'gpt-5.5' model is not supported when using Codex with a ChatGPT account."}}`
+    和 2026-10-03 那五顆下架模型的失敗方式相同（6.3.0「移除」一節）。
+  - **移除不等於擋下**：`gpt-` 前綴照樣把它路由到 codex，然後收到上面那個 400。
+    `KNOWN_BAD_MODELS` 的理由改成「已退役」並附上原文；`verify-alias-config` 把它加進 `gone` 陣列，
+    釘住三件事：不在清單、仍路由到 codex、仍設得成 alias target。
+  - **目錄裡已經沒有任何模型只到 `xhigh`**（最低也到 `max`）。所以 `run` 工具描述裡
+    「gpt-5.5 stops at "xhigh"」找不到替代例子，改寫成歷史敘述；「gpt-5.5 + max 回 HTTP 400」是
+    2026-09-09 的實測（這次沒有重測），改成過去式保留，沒有刪。`run` 工具的 `model` 描述原本只交代 10-03 那五顆，
+    補一句 gpt-5.5 也以同樣方式移除（稽核指出）。`codex.ts` 的註解同樣改成過去式。`CODEX_REASONING` 收的是聯集，不用動。
+  - 測試裡 9 處拿 `gpt-5.5` 當「會路由到 codex 的名字」的 fixture，全部換成 `gpt-6.1-sol`。
+    10-12 盤點時是 6 處，之後加進來的 `verify-launcher-jobs` 又多 3 處。逐處看過前後文，
+    沒有任何一處依賴 effort 上限或預設 effort。`verify-alias-config` 那處要測「設定檔的 ultra 落到 codex 時照送」，
+    原本借的 gpt-5.5 自己只到 xhigh，換成支援 ultra 的 `gpt-6.1-sol` 反而更貼切。
+  - 突變「已下架的 gpt-5.4 被加回清單」的錨點原本是 `  'gpt-5.5',`（清單最後一項），改成 `  'gpt-5.6-luna',`，
+    在 `codex.ts` 只命中一處；`name`、`expect` 不變。（Claude）
+  - 驗證：`npm test` 第一輪 30/31，`verify-restart-recovery` 失敗。原因是它的 stub 睡 14 秒，斷言要求重啟後
+    job 仍在 running，而那次第一個 claude stub 跑了 15.4 秒，已經 completed。這支沒有用到 gpt-5.5，
+    當時機器上同時跑著稽核 agent；單獨重跑 10/10 通過。重 build 後第二輪 31/31 通過。
+    稽核（sonnet medium，唯讀，A–F 六項）沒有必修項，5 條低嚴重度意見：
+    採納 2 條（上面 `model` 描述與「這次沒有重測」兩處）；
+    判定不改 3 條：6.3.0 舊段落是歷史紀錄；`run` 描述的「was retired on 2026-10-14」有 vendor 日期，
+    加上退役後的 400 實測；「10-12 盤點 6 處」記在知識庫的盤點紀錄，不在 repo 內。（判定：Claude）
+
 ## [6.9.0] - 2026-10-12
 
 > 同專案自動接管：原派工 session 結束後，同一個專案新開的 session 會自動接手還在跑（或結束 30 分鐘內）的 job，不必下指令；

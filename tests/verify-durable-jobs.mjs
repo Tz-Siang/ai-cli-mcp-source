@@ -84,7 +84,7 @@ function client(state, differentParent = false) {
   const stop = async () => { child.stdin.end(); if (!differentParent) child.kill('SIGKILL'); await closed; clients.delete(api); };
   const api = { child, call, init, stop }; clients.add(api); return api;
 }
-async function dispatch(c, state, spec, model = 'gpt-5.5') {
+async function dispatch(c, state, spec, model = 'gpt-6.1-sol') {
   const existing = new Set(existsSync(join(state, 'jobs')) ? readdirSync(join(state, 'jobs')) : []);
   const start = await c.call('run', { model, prompt: JSON.stringify(spec), workFolder: ROOT, session_id: 'original-session' });
   const dir = await until(() => readdirSync(join(state, 'jobs')).filter(id => !existing.has(id)).map(id => join(state, 'jobs', id)).find(dir => existsSync(join(dir, 'meta.json')) && JSON.parse(readFileSync(join(dir, 'meta.json'))).pid === start.pid));

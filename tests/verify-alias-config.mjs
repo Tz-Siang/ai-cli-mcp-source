@@ -603,10 +603,11 @@ async function main(baseConfig) {
       !catalog.listKnownModels().includes(hidden)
     );
   }
-  // ★ 移出清單 ≠ 擋下來。這五個已不在 vendor 目錄，所以不再當候選廣告出去，
+  // ★ 移出清單 ≠ 擋下來。這幾個已不在 vendor 目錄（前五個 2026-10-03 移除，
+  //   gpt-5.5 在 2026-10-14 退役、10-15 移除），所以不再當候選廣告出去，
   //   但 matchesModel 是 startsWith('gpt-')，明確指定仍然會路由到 codex，
   //   也仍然設得成 alias target。兩件事分開釘，避免日後有人誤以為移除就等於封鎖。
-  for (const gone of ['gpt-5.4', 'gpt-5.4-mini', 'gpt-5.3-codex', 'gpt-5.3-codex-spark', 'gpt-5.2']) {
+  for (const gone of ['gpt-5.4', 'gpt-5.4-mini', 'gpt-5.3-codex', 'gpt-5.3-codex-spark', 'gpt-5.2', 'gpt-5.5']) {
     check(`${gone} 已不在已知模型清單`, !catalog.listKnownModels().includes(gone));
     check(`${gone} 移出清單後仍路由到 codex（移除不等於擋下）`, catalog.resolveAgentIdForModel(gone) === 'codex');
     check(`${gone} 移出清單後仍設得成 alias target`, catalog.isKnownModelTarget(gone));
@@ -629,7 +630,7 @@ async function main(baseConfig) {
     cmd.agent === 'claude' && !cmd.args.includes('--effort'),
     JSON.stringify(cmd.args)
   );
-  cmd = buildWith('gpt-5.5', undefined);
+  cmd = buildWith('gpt-6.1-sol', undefined);
   check(
     '設定檔的 ultra 落到 codex 時照送',
     cmd.agent === 'codex' && cmd.args.includes('model_reasoning_effort=ultra'),

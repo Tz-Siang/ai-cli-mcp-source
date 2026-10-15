@@ -45,8 +45,15 @@ import { debugLog } from '../core/debug.js';
  *   - 不收 `gpt-reserve` 與 `codex-auto-review`：vendor 標 `visibility: "hide"`，
  *     也就是**它自己就不對外列出**，所以我們的候選清單也不列。
  *     （`hide` 只證明不列出；這兩顆實際用途沒有實測，不要寫成「只供 CLI 內部使用」。）
- *   - `gpt-5.5` 留著，但 vendor 的 `upgrade` 欄位標明 2026-10-14T19:00Z 退役、
- *     建議改用 `gpt-6.1-sol`（見 catalog.ts 的 KNOWN_BAD_MODELS）。
+ *   - `gpt-5.5` 當時還留著：vendor 的 `upgrade` 欄位標明 2026-10-14T19:00Z 退役、
+ *     建議改用 `gpt-6.1-sol`。
+ *
+ * ★ 2026-10-15 移除 `gpt-5.5`。依據是 codex-cli 0.162.1 自己重抓的目錄（先派一個
+ *   trivial job 讓 `client_version` 與 `codex --version` 對上，才讀）：9 筆，已經沒有
+ *   gpt-5.5。退役後指名派一個 trivial job 實測，失敗方式和上面那五顆一樣：exitCode 1，
+ *   CLI 先印 metadata not found，接著 API 回 HTTP 400 `The 'gpt-5.5' model is not
+ *   supported when using Codex with a ChatGPT account.`。一樣只是不再列為候選，
+ *   `gpt-` 前綴照樣路由到 codex；原文記在 catalog.ts 的 KNOWN_BAD_MODELS。
  */
 const CODEX_MODELS = [
   'gpt-6.1-sol',
@@ -56,7 +63,6 @@ const CODEX_MODELS = [
   'gpt-5.6-sol',
   'gpt-5.6-terra',
   'gpt-5.6-luna',
-  'gpt-5.5',
 ] as const;
 
 /**
@@ -64,20 +70,22 @@ const CODEX_MODELS = [
  *
  * ★ 2026-09-05 依 codex-cli 0.151.0 的 `~/.codex/models_cache.json` 對照：
  *   gpt-6-astra / gpt-5.6-sol / gpt-5.6-terra 提供 low…ultra 六級，gpt-5.6-luna
- *   到 max，gpt-5.5 / gpt-5.4-mini / gpt-5.3-codex-spark 仍只到 xhigh。
+ *   到 max，gpt-5.5 / gpt-5.4-mini / gpt-5.3-codex-spark 當時只到 xhigh。
  *   2026-09-26 依 codex-cli 0.155.1 的同一份快取補：gpt-6-sol 到 ultra、gpt-6-luna
  *   到 max（聯集不變，所以這個 Set 不用動）。
  *   2026-10-03 依 codex-cli 0.160.0 所用的同一份快取補：gpt-6.1-sol 到 ultra、
  *   CLI 端預設 low（聯集仍不變）。同日移出清單的五個舊名稱裡，gpt-5.4-mini 與
  *   gpt-5.3-codex-spark 都曾是上面那行 xhigh 上限的依據，但 Set 收的是聯集、
- *   gpt-5.5 仍在清單裡也仍只到 xhigh，所以這個 Set 一樣不用動。
+ *   gpt-5.5 當時仍在清單裡也仍只到 xhigh，所以這個 Set 一樣不用動。
+ *   2026-10-15 gpt-5.5 退役後，0.162.1 的目錄裡已經沒有任何模型只到 xhigh
+ *   （最低也到 max）；聯集還是同一組，Set 照舊不動。
  *
  *   這裡收的是**聯集**，不按模型細分：這份清單是靜態後備值（見 types.ts 的
  *   ModelListSource），逐模型寫死只會多一份更容易過時的表。
  *
  *   ⚠️ 不要把「不支援的級別由 codex CLI 自己拒絕」寫回來——這句 2026-09-26 已被
  *   實測推翻兩次，但當時只改了 mcp.ts 的工具描述，漏了這段註解：
- *   gpt-5.5 + max 是**建完 thread 與 turn 之後**才收到 API HTTP 400（不是 CLI
+ *   gpt-5.5（2026-10-14 退役）+ max 當時是**建完 thread 與 turn 之後**才收到 API HTTP 400（不是 CLI
  *   本地拒絕），而 gpt-6-luna + ultra（vendor 目錄說它只到 max）**exit 0、正常
  *   回答，完全不報錯**。所以 exit 0 不證明那個等級生效，要驗只能看行為。
  */
