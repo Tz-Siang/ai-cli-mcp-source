@@ -121,6 +121,8 @@
   - 驗證：`npm test` 第一輪 30/31，`verify-restart-recovery` 失敗。原因是它的 stub 睡 14 秒，斷言要求重啟後
     job 仍在 running，而那次第一個 claude stub 跑了 15.4 秒，已經 completed。這支沒有用到 gpt-5.5，
     當時機器上同時跑著稽核 agent；單獨重跑 10/10 通過。重 build 後第二輪 31/31 通過。
+    突變 `--script verify-alias-config.mjs`（在 commit 後的 HEAD 上跑，與 `npm test` 分開序列跑）：
+    43 筆全部由指定斷言 KILLED，SURVIVED 0、ERROR 0，換了錨點的那筆也在內。
     稽核（sonnet medium，唯讀，A–F 六項）沒有必修項，5 條低嚴重度意見：
     採納 2 條（上面 `model` 描述與「這次沒有重測」兩處）；
     判定不改 3 條：6.3.0 舊段落是歷史紀錄；`run` 描述的「was retired on 2026-10-14」有 vendor 日期，
