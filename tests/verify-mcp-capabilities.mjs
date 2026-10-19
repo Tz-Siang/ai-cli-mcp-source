@@ -74,6 +74,7 @@ console.log('MCP run 的唯讀能力（capabilities → strict builder）\n');
     '★ capabilities → strict builder（codex：--sandbox read-only、零危險旗標）',
     built.args.join(' ')
   );
+  check(!built.args.includes('--ephemeral'), '★ codex strict 新開保留 session（無 --ephemeral）');
   // Windows 的 read-only 沒有沙箱、只認安全指令清單；提示只進 stdin，原 prompt 不變。
   check(
     built.prompt === 'hi'
@@ -83,6 +84,37 @@ console.log('MCP run 的唯讀能力（capabilities → strict builder）\n');
     '★ codex strict 在 Windows 的 stdin 前綴讀檔提示（不用管線／cmd /c），其他平台原樣',
     JSON.stringify({ platform: process.platform, prompt: built.prompt, stdin: built.stdinPrompt?.slice(0, 40) })
   );
+}
+
+// 續接使用 resume 接受的 TOML 設定；不能繼承一般 session 的可寫權限。
+{
+  const built = plan({ model: 'gpt-6.1-sol', session_id: 'strict-session', reasoning_effort: 'low', capabilities: ['fs/read', 'analysis/produce'] });
+  const i = built.args.indexOf("sandbox_mode='read-only'");
+  check(
+    built.args.slice(0, 3).join(' ') === 'exec resume strict-session'
+      && !built.args.includes('--sandbox') && i > 0 && built.args[i - 1] === '-c'
+      && built.args.every(a => !/dangerous/i.test(a))
+      && !built.args.includes('--ephemeral') && built.args.includes('--ignore-user-config')
+      && built.args.includes('--skip-git-repo-check') && built.args.includes('--json') && built.args.at(-1) === '-',
+    '★ codex strict 續接以 TOML 單引號設定唯讀、無 --sandbox、保留 session',
+    built.args.join(' ')
+  );
+  for (const sessionId of [undefined, 'normal-session']) {
+    const normal = plan({ model: 'gpt-6.1-sol', session_id: sessionId, reasoning_effort: 'low' });
+    check(
+      JSON.stringify(normal.args) === JSON.stringify([
+        'exec', ...(sessionId ? ['resume', sessionId] : []),
+        '-c', 'model_reasoning_effort=low', '--model', 'gpt-6.1-sol',
+        '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', '--json', '-',
+      ]) && normal.stdinPrompt === 'hi',
+      `★ codex 一般模式完整 argv 不變（${sessionId ? '續接' : '新開'}）`,
+      normal.args.join(' ')
+    );
+  }
+  let refused = false;
+  try { plan({ model: 'gpt-6.1-sol', session_id: 'strict-session', capabilities: ['fs/write'] }); }
+  catch (error) { refused = /拒絕啟動/.test(error.message); }
+  check(refused, '★ codex strict 續接不支援能力仍 fail-closed');
 }
 
 // 4. 空陣列 ≠ 沒給。折成同一件事，等於讓要求限制的呼叫端拿到全開權限而不自知。

@@ -10,6 +10,8 @@
 
 ### 修復
 
+- Codex strict 唯讀 job 移除 `--ephemeral` 保留可續接 session；續接改用 `-c sandbox_mode='read-only'`，避免 `exec resume` 不支援 `--sandbox` 而 exit 2，並明確覆寫原 session 權限。新開保留 `--sandbox read-only`，不支援的能力仍拒絕啟動；一般模式不變。（Codex）
+
 - 補 Codex app-server 額度實作交件：保留分支 commit、紅→綠、45 筆指定斷言突變、Windows 真機比對與 node-pty 清理限制，列明主導者審查、合併、重建 dist 與 MCP 重連步驟。（Codex）
 
 - Codex 額度回歸新增 7 筆突變，涵蓋 used／remaining、RPC 失敗假 ok、回顯前 Enter、raw 尾端誤判、通知、fresh fallback 與 PTY kill 重入；更新因查詢順序改變而過期的既有突變片段。真機素材遮罩先保留 ANSI token，避免 email 正規式吃掉色碼，並釘住原始位元組。（Codex）

@@ -2837,5 +2837,21 @@
     "to": "        ptyClosed = true;\n        try { ptyProc.kill(); } catch {}\n        try { ptyProc.kill(); } catch {}",
     "expect": "TUI provider waits echo and closes owned PTY once",
     "script": "verify-codex-app-server.mjs"
+  },
+  {
+    "name": "Codex strict resume 錯用 --sandbox",
+    "file": "src/agents/codex.ts",
+    "from": "  if (sessionId) args.push('-c', \"sandbox_mode='read-only'\");",
+    "to": "  if (sessionId) args.push('--sandbox', 'read-only');",
+    "expect": "codex strict 續接以 TOML 單引號設定唯讀",
+    "script": "verify-mcp-capabilities.mjs"
+  },
+  {
+    "name": "Codex strict 新開恢復 ephemeral",
+    "file": "src/agents/codex.ts",
+    "from": "  else args.push('--sandbox', 'read-only');",
+    "to": "  else args.push('--sandbox', 'read-only', '--ephemeral');",
+    "expect": "codex strict 新開保留 session",
+    "script": "verify-mcp-capabilities.mjs"
   }
 ]

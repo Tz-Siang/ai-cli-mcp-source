@@ -126,18 +126,20 @@ function buildStrictCommand(
   }
   /*
     與 buildCommand 的差別：**沒有 --dangerously-bypass-approvals-and-sandbox**。
-      -s read-only          模型產生的指令只能讀
+      --sandbox read-only   新開時模型產生的指令只能讀
+      -c sandbox_mode='read-only'  續接不支援 --sandbox，改用相同的唯讀設定
       --ignore-user-config  不載使用者的全域設定
-      --ephemeral           不留 session 殘骸
+      2026-10-19 移除 --ephemeral：唯讀 job 也必須留存 session，供後續續接。
   */
   const args: string[] = sessionId ? ['exec', 'resume', sessionId] : ['exec'];
   if (reasoningEffort) args.push('-c', `model_reasoning_effort=${reasoningEffort}`);
   if (resolvedModel) args.push('--model', resolvedModel);
+  // TOML 單引號避免 Windows cmd.exe /c 剝除雙引號（同 workerMcpEnvOverrides）。
+  // 新開與續接都明確設定唯讀，不繼承舊 session 的可寫權限、不靜默放寬。
+  if (sessionId) args.push('-c', "sandbox_mode='read-only'");
+  else args.push('--sandbox', 'read-only');
   args.push(
-    '--sandbox',
-    'read-only',
     '--ignore-user-config',
-    '--ephemeral',
     '--skip-git-repo-check',
     '--json',
     '-'
