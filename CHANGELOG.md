@@ -18,7 +18,7 @@
 
 ### 修復
 
-- PTY 清單測試改以 jobId 判斷身分，要求本 job 恰好一列且 PID 相符；同 PID 其他列須有非空 jobId、可解析且早於本 job 的 startTime，符合時印出 OBSERVED PID reuse。保留逐列欄位、live／file 投影與 metadata 時間診斷，並補固定資料 identity 測試防止遮住重複 jobId、legacy 無 ID 或較晚 job。推論為 Windows PID 重用，待 CI 確認；產品行為不變。（Codex）
+- PTY 清單測試改以 jobId 判斷身分，要求本 job 恰好一列且 PID 相符；同 PID 其他列須有非空 jobId、可解析且早於本 job 的 startTime，符合時印出 OBSERVED PID reuse。保留逐列欄位、live／file 投影與 metadata 時間診斷，並補固定資料 identity 測試防止遮住重複 jobId、legacy 無 ID 或較晚 job。背景：CI Windows node 20.19 在這組「只列一次」的檢查連三次紅（`2 !== 1`，兩次在 `jobs --json`、一次在 FileProcessService `listProcesses`），node 22 與 Linux／macOS 都沒有；固定帳本證實「同 pid、不同 jobId」必定重現這個症狀。改版後的 CI 全平台綠，但那一次沒有出現任何重複列，所以「Windows 重用已結束 job 的 PID」仍是推論、未證實。產品行為不變。（Codex，CI 結果由 Claude 補記）
 
 - Codex strict 唯讀 job 移除 `--ephemeral` 保留可續接 session；續接改用 `-c sandbox_mode='read-only'`，避免 `exec resume` 不支援 `--sandbox` 而 exit 2，並明確覆寫原 session 權限。新開保留 `--sandbox read-only`，不支援的能力仍拒絕啟動；一般模式不變。（Codex）
 
