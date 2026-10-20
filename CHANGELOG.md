@@ -8,6 +8,14 @@
 
 ## [Unreleased]
 
+## [6.9.1] - 2026-10-20
+
+> Codex 唯讀 job 可以續接了：`run` 同時帶 `session_id` 與 `capabilities` 時，舊版把 `--sandbox` 傳給 `codex exec resume`，
+> CLI 不收這個參數而 exit 2；現在續接改用 `-c sandbox_mode='read-only'`，唯讀 job 也不再帶 `--ephemeral`，回傳的 session 接得回去。
+> 另有 Windows 上 Claude Code 結束時不再連帶殺掉 durable job（runner 改由短命 launcher 啟動）、Windows agy 可接回與接管、
+> Codex `query_usage` 改走 app-server JSON-RPC、`gpt-5.5` 退役移出候選清單、ai-cli-jobs 面板 0.1.3／0.1.4。修復為主（SemVer PATCH）。
+> 看得到的行為變化：codex 唯讀 job 的 session 會留在 `~/.codex/sessions`；`npm test` 改為依序全跑再印彙總。
+
 ### 修復
 
 - Codex strict 唯讀 job 移除 `--ephemeral` 保留可續接 session；續接改用 `-c sandbox_mode='read-only'`，避免 `exec resume` 不支援 `--sandbox` 而 exit 2，並明確覆寫原 session 權限。新開保留 `--sandbox read-only`，不支援的能力仍拒絕啟動；一般模式不變。（Codex）

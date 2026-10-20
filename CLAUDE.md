@@ -27,7 +27,7 @@ Peter Steinberger 的 claude-code-mcp（MIT）。分歧點在架構：上游把�
 | --- | --- |
 | GitHub | `moerasermax/tkflyc-ai-cli` — **2026-09-09 改名**，舊名是 `ai-cli-mcp` |
 | npm | `@tkflyc/ai-cli-mcp` — **已公開發佈** |
-| 版本 | `6.9.0` — 2026-10-12 發佈（同專案自動接管原 session 已結束的 job、worker 底下的 MCP 不接；ai-cli-jobs 面板 0.1.2；codex 唯讀在 Windows 的讀檔提示；Grok 派工定位）。前一版 `6.8.0`（2026-10-09，持久化 job 與 Grok CLI）。GitHub Release 中英並存。**npm 上沒有 `6.2.0`**：那版只 bump 了 `package.json` 與 CHANGELOG，沒打 tag、沒發佈，內容僅透過 git 自動更新進各機器 |
+| 版本 | `6.9.1` — 2026-10-20 發佈（codex 唯讀 job 可續接；Windows runner 改由 launcher 啟動、agy 可接回；Codex 額度改走 app-server RPC；gpt-5.5 退役）。前一版 `6.9.0`（2026-10-12，同專案自動接管）。GitHub Release 中英並存。**npm 上沒有 `6.2.0`**：那版只 bump 了 `package.json` 與 CHANGELOG，沒打 tag、沒發佈，內容僅透過 git 自動更新進各機器 |
 | 授權 | **Apache-2.0** — 2026-09-09 從 MIT 改的，附 `NOTICE` |
 | 主分支 | `master`（push 到 master 等同部署，所有機器會自動拉） |
 | CI | Windows / Linux / macOS × Node 20.19、22 — **三個平台都是閘門** |
