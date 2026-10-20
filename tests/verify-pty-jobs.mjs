@@ -289,10 +289,31 @@ try {
   await test('PTY peek and live-jobs list the durable job once', async () => {
     const observed = await a.call('peek', { pids: [job.pid], timeSec: 1 });
     assert.equal(observed.processes[0].jobId, job.jobId); assert.equal(observed.processes[0].status, 'running');
-    assert.equal((await a.call('list_processes')).filter(r => r.pid === job.pid).length, 1);
-    assert.equal((await readLiveJobs(state)).filter(r => r.pid === job.pid).length, 1);
+    // 保留 PID 斷言；缺欄位明列 null，避免 JSON.stringify 隱去辨識重複所需的證據。
+    const matching = (rows, origin) => rows.filter(r => r.pid === job.pid).map(r => ({
+      origin, jobId: r.jobId ?? null, pid: r.pid, status: r.status ?? null,
+      startTime: r.startTime ?? null, agent: r.agent ?? null, source: r.source ?? null,
+    }));
+    const assertOnce = (rows, origin, sources = {}) => {
+      const matches = matching(rows, origin);
+      assert.equal(matches.length, 1, JSON.stringify({
+        expectedJobId: job.jobId, expectedPid: job.pid, origin, matches, ...sources,
+      }, null, 2));
+    };
+    assertOnce(await a.call('list_processes'), 'list_processes');
+    const live = await readLiveJobs(state);
+    assertOnce(live, 'live');
     let output = ''; assert.equal(await runJobs(['--json'], { stdout: text => output += text }), 0);
-    assert.equal(JSON.parse(output).filter(r => r.pid === job.pid).length, 1);
+    const listed = JSON.parse(output), sources = {};
+    if (listed.filter(r => r.pid === job.pid).length !== 1) {
+      // source 表示 mcp/cli，不等於讀取路徑；僅失敗時補 file 投影，避免改變正常測試時序。
+      sources.live = matching(live, 'live');
+      const file = new FileProcessService({ stateDir: state, cliPaths: {}, readOnly: true });
+      try { sources.file = matching(await file.listJobSummaries(), 'file'); }
+      catch (error) { sources.fileError = String(error); }
+      finally { file.dispose(); }
+    }
+    assertOnce(listed, 'jobs --json (merged)', sources);
   });
   await test('PTY survives SDK server exit and a different principal automatically adopts', async () => {
     const old = job.meta.principal.pid; await a.stop();
