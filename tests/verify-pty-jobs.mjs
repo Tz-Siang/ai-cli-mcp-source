@@ -37,6 +37,33 @@ async function test(name, fn) {
   catch (e) { failed++; console.log('FAIL ' + name + '\n' + e.stack); }
 }
 const json = path => JSON.parse(readFileSync(path, 'utf8'));
+// PID 可被新 job 重用；同 jobId 必須唯一，同 PID 的其他紀錄只能屬於較早 job。
+async function assertJobIdentity(rows, expected, origin, { sources = async () => ({}), log = console.log,
+  readMeta = id => { try { return json(join(state, 'jobs', id, 'meta.json')); } catch { return undefined; } } } = {}) {
+  const relevant = rows.filter(r => r.jobId === expected.jobId || r.pid === expected.pid).map(r => {
+    const meta = typeof r.jobId === 'string' && r.jobId ? readMeta(r.jobId) : undefined;
+    return { jobId: r.jobId ?? null, pid: r.pid, status: r.status ?? null,
+      startTime: r.startTime ?? meta?.startTime ?? null, metadataStartTime: meta?.startTime ?? null,
+      agent: r.agent ?? null, origin: origin.startsWith('file') ? `${origin}:${r.jobId ? 'jobs' : 'cwds'}` : origin,
+      source: r.source ?? meta?.source ?? null };
+  });
+  const current = relevant.filter(r => r.jobId === expected.jobId);
+  const earlier = relevant.filter(r => r.pid === expected.pid && r.jobId !== expected.jobId);
+  const expectedTime = Date.parse(expected.startTime), violations = [];
+  if (!expected.jobId || current.length !== 1) violations.push('expected jobId must occur exactly once');
+  if (current.some(r => r.pid !== expected.pid)) violations.push('expected jobId must have expected pid');
+  if (!Number.isFinite(expectedTime)) violations.push('expected startTime must parse');
+  if (earlier.some(r => typeof r.jobId !== 'string' || !r.jobId.trim()
+    || !Number.isFinite(Date.parse(r.startTime)) || !(Date.parse(r.startTime) < expectedTime))) {
+    violations.push('other rows with the same pid must have nonempty jobId and earlier startTime');
+  }
+  if (violations.length) {
+    let projections;
+    try { projections = await sources(); } catch (error) { projections = { projectionError: String(error) }; }
+    assert.deepEqual(violations, [], JSON.stringify({ expected, origin, matches: relevant, ...projections }, null, 2));
+  }
+  if (earlier.length) log(`OBSERVED PID reuse (${origin}): pid ${expected.pid} also listed for earlier job(s) ${earlier.map(r => r.jobId).join(', ')}`);
+}
 const stub = join(TEMP, 'stub.mjs');
 writeFileSync(stub, `import {spawn} from 'node:child_process'; import {writeFileSync} from 'node:fs';
 const spec=JSON.parse(process.argv[2]);
@@ -161,6 +188,19 @@ const originalBuilder = getAgent('antigravity').buildCommand;
 const originalDirectExec = getAgent('antigravity').win32DirectExec;
 getAgent('antigravity').win32DirectExec = true;
 try {
+  await test('PTY list identity accepts earlier PID reuse and rejects ambiguous jobs', async () => {
+    const current = { jobId: 'current', pid: 123, status: 'running', startTime: '2026-10-20T02:00:00Z', agent: 'stub', source: 'cli' };
+    const earlier = { ...current, jobId: 'earlier', startTime: '2026-10-20T01:00:00Z' };
+    const observed = [], options = { readMeta: () => undefined, log: line => { observed.push(line); console.log(line); } };
+    await assertJobIdentity([current, earlier], current, 'identity fixture', options);
+    assert.deepEqual(observed, ['OBSERVED PID reuse (identity fixture): pid 123 also listed for earlier job(s) earlier']);
+    for (const rows of [[current, current], [current, { ...earlier, jobId: null }],
+      [current, { ...earlier, startTime: '2026-10-20T03:00:00Z' }], [earlier],
+      [current, { ...earlier, startTime: 'invalid' }], [{ ...current, pid: 456 }]]) {
+      await assert.rejects(assertJobIdentity(rows, current, 'identity fixture', options), { code: 'ERR_ASSERTION' });
+    }
+    assert.equal(observed.length, 1, 'rejected identity rows must not report accepted PID reuse');
+  });
   await test('PTY ANSI cleaner preserves split CSI and long OSC without delaying plain text', () => {
     const clean = createAnsiCleaner();
     assert.equal(clean.push('first\x1b['), 'first'); assert.equal(clean.push('31mred\x1b[0m'), 'red');
@@ -289,31 +329,25 @@ try {
   await test('PTY peek and live-jobs list the durable job once', async () => {
     const observed = await a.call('peek', { pids: [job.pid], timeSec: 1 });
     assert.equal(observed.processes[0].jobId, job.jobId); assert.equal(observed.processes[0].status, 'running');
-    // 保留 PID 斷言；缺欄位明列 null，避免 JSON.stringify 隱去辨識重複所需的證據。
-    const matching = (rows, origin) => rows.filter(r => r.pid === job.pid).map(r => ({
-      origin, jobId: r.jobId ?? null, pid: r.pid, status: r.status ?? null,
-      startTime: r.startTime ?? null, agent: r.agent ?? null, source: r.source ?? null,
-    }));
-    const assertOnce = (rows, origin, sources = {}) => {
-      const matches = matching(rows, origin);
-      assert.equal(matches.length, 1, JSON.stringify({
-        expectedJobId: job.jobId, expectedPid: job.pid, origin, matches, ...sources,
-      }, null, 2));
-    };
-    assertOnce(await a.call('list_processes'), 'list_processes');
-    const live = await readLiveJobs(state);
-    assertOnce(live, 'live');
-    let output = ''; assert.equal(await runJobs(['--json'], { stdout: text => output += text }), 0);
-    const listed = JSON.parse(output), sources = {};
-    if (listed.filter(r => r.pid === job.pid).length !== 1) {
-      // source 表示 mcp/cli，不等於讀取路徑；僅失敗時補 file 投影，避免改變正常測試時序。
-      sources.live = matching(live, 'live');
+    const expected = { jobId: job.jobId, pid: job.pid, startTime: job.meta.startTime };
+    const projections = async () => {
+      const matching = (rows, origin) => rows.filter(r => r.pid === job.pid || r.jobId === job.jobId).map(r => ({
+        origin, jobId: r.jobId ?? null, pid: r.pid, status: r.status ?? null,
+        startTime: r.startTime ?? null, agent: r.agent ?? null, source: r.source ?? null,
+      }));
+      const sources = { live: matching(await readLiveJobs(state), 'live') };
       const file = new FileProcessService({ stateDir: state, cliPaths: {}, readOnly: true });
       try { sources.file = matching(await file.listJobSummaries(), 'file'); }
       catch (error) { sources.fileError = String(error); }
       finally { file.dispose(); }
-    }
-    assertOnce(listed, 'jobs --json (merged)', sources);
+      return sources;
+    };
+    const options = { sources: projections };
+    await assertJobIdentity(await a.call('list_processes'), expected, 'list_processes', options);
+    const live = await readLiveJobs(state);
+    await assertJobIdentity(live, expected, 'live', options);
+    let output = ''; assert.equal(await runJobs(['--json'], { stdout: text => output += text }), 0);
+    await assertJobIdentity(JSON.parse(output), expected, 'jobs --json (merged)', options);
   });
   await test('PTY survives SDK server exit and a different principal automatically adopts', async () => {
     const old = job.meta.principal.pid; await a.stop();
@@ -397,8 +431,13 @@ try {
     const start = await service.startProcess({ model: 'agy-default', prompt: JSON.stringify({ delay: 3000 }), cwd: ROOT });
     if (!start.jobId) await service.killProcess(start.pid);
     runners.add(start.pid); assert.ok(start.jobId);
-    const dir = join(state, 'jobs', start.jobId); assert.ok(json(join(dir, 'meta.json')).worker?.started);
-    assert.equal((await service.listProcesses()).filter(r => r.pid === start.pid).length, 1);
+    const dir = join(state, 'jobs', start.jobId), meta = json(join(dir, 'meta.json')); assert.ok(meta.worker?.started);
+    await assertJobIdentity(await service.listProcesses(), { ...start, startTime: meta.startTime }, 'file listProcesses', {
+      sources: async () => ({ file: (await service.listJobSummaries()).filter(r => r.pid === start.pid || r.jobId === start.jobId).map(r => ({
+          jobId: r.jobId ?? null, pid: r.pid, status: r.status, startTime: r.startTime,
+          agent: r.agent, origin: r.jobId ? 'file:jobs' : 'file:cwds', source: r.source,
+        })) }),
+    });
     const exit = await exited({ pid: start.pid, dir }); assert.equal(exit.exitCode, 0);
     assert.ok(!readFileSync(join(dir, 'stdout.log'), 'utf8').includes('\x1b'));
   });

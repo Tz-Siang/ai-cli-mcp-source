@@ -18,7 +18,7 @@
 
 ### 修復
 
-- PTY 工作清單的三個 PID 唯一性斷言補上 jobId、pid、status、startTime、agent 與來源診斷；`jobs --json` 失敗時另列 live／file 投影，讓 Windows CI 的重複列能區分 PID 重用與合併問題。根因尚未確認，保留原斷言與產品行為。（Codex）
+- PTY 清單測試改以 jobId 判斷身分，要求本 job 恰好一列且 PID 相符；同 PID 其他列須有非空 jobId、可解析且早於本 job 的 startTime，符合時印出 OBSERVED PID reuse。保留逐列欄位、live／file 投影與 metadata 時間診斷，並補固定資料 identity 測試防止遮住重複 jobId、legacy 無 ID 或較晚 job。推論為 Windows PID 重用，待 CI 確認；產品行為不變。（Codex）
 
 - Codex strict 唯讀 job 移除 `--ephemeral` 保留可續接 session；續接改用 `-c sandbox_mode='read-only'`，避免 `exec resume` 不支援 `--sandbox` 而 exit 2，並明確覆寫原 session 權限。新開保留 `--sandbox read-only`，不支援的能力仍拒絕啟動；一般模式不變。（Codex）
 
