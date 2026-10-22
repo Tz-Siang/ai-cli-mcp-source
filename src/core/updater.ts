@@ -126,24 +126,29 @@ const BUNDLED_PLUGINS: ReadonlyArray<{ name: string; dir: string; marketplace: s
   { name: 'ai-cli-jobs', dir: 'plugins/ai-cli-jobs', marketplace: 'tkflyc-ai-cli', repo: 'moerasermax/tkflyc-ai-cli', label: 'ai-cli-jobs 派工面板' },
 ];
 
-/** 數字段逐段比；非數字段當 0，比不出來就當相同，不憑猜測叫人更新。 */
+/** 只比 `x.y.z`；任一邊解析不出來就當「不比」，不憑猜測叫人更新（稽核：亂碼版本曾被當成 0.0.0）。 */
 function olderVersion(installed: string, latest: string): boolean {
-  const parts = (v: string) => v.split(/[.+-]/).slice(0, 3).map((n) => Number.parseInt(n, 10) || 0);
+  const parts = (v: string) => /^(\d+)\.(\d+)\.(\d+)/.exec(v.trim())?.slice(1, 4).map(Number);
   const [a, b] = [parts(installed), parts(latest)];
-  for (let i = 0; i < 3; i++) if ((a[i] ?? 0) !== (b[i] ?? 0)) return (a[i] ?? 0) < (b[i] ?? 0);
+  if (!a || !b) return false;
+  for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i]! < b[i]!;
   return false;
 }
 
+/** installed_plugins.json 裡的一份安裝：版本，與它裝在哪（user，或 project 的路徑）。 */
+export interface InstalledCopy { version: string; where: string }
+
 /**
- * 一個外掛該不該問、問什麼。`installed` 為 null 表示讀不到安裝紀錄（不是「沒裝」）；
- * `knownMarketplace` 為 false 時安裝指令要先加 marketplace。
+ * 一個外掛該不該問、問什麼。`installed` 為 null 表示讀不到安裝紀錄或紀錄有缺（不是「沒裝」）；
+ * `knownMarketplace` 為 false 時安裝與更新都要先加 marketplace。
  */
 export function pluginAction(plugin: { name: string; marketplace: string; repo: string; label: string },
-  latest: string, installed: readonly string[] | null, knownMarketplace: boolean): string | null {
+  latest: string, installed: readonly InstalledCopy[] | null, knownMarketplace: boolean): string | null {
   const id = `${plugin.name}@${plugin.marketplace}`;
   const ask = '（給呼叫端 AI：請先問使用者要不要做，使用者同意才執行；不同意就略過，不要自己裝。）';
-  const update = `    claude plugin marketplace update ${plugin.marketplace}\n    claude plugin update ${id}\n  做完要重開 Claude Code 才生效。`;
-  const install = `${knownMarketplace ? '' : `    claude plugin marketplace add ${plugin.repo}\n`}    claude plugin install ${id}\n  做完要重開 Claude Code 才生效。`;
+  const add = knownMarketplace ? '' : `    claude plugin marketplace add ${plugin.repo}\n`;
+  const update = `${add}    claude plugin marketplace update ${plugin.marketplace}\n    claude plugin update ${id}\n  做完要重開 Claude Code 才生效。`;
+  const install = `${add}    claude plugin install ${id}\n  做完要重開 Claude Code 才生效。`;
   if (installed === null) {
     return `【要問使用者】${plugin.label}有新版 ${latest}，但讀不到這台機器的外掛安裝紀錄，無法判斷有沒有裝。${ask}\n` +
       `  已安裝的話，更新：\n${update}\n  沒裝而想裝的話：\n${install}`;
@@ -152,9 +157,10 @@ export function pluginAction(plugin: { name: string; marketplace: string; repo: 
     return `【要問使用者】${plugin.label}有新版 ${latest}，這台機器還沒裝。它會在 Claude Code 輸入框上方列出全機 ai-cli job。` +
       `要不要安裝？${ask}\n  安裝：\n${install}`;
   }
-  const stale = installed.filter((v) => olderVersion(v, latest));
+  const stale = installed.filter((copy) => olderVersion(copy.version, latest));
   if (!stale.length) return null;
-  return `【要問使用者】${plugin.label}有新版 ${latest}，這台機器裝的是 ${[...new Set(stale)].join('、')}。` +
+  // 多份安裝（user＋project）時說清楚是哪一份舊，使用者才知道要更新哪裡。
+  return `【要問使用者】${plugin.label}有新版 ${latest}，這台機器裝的是 ${stale.map((c) => `${c.version}（${c.where}）`).join('、')}。` +
     `git pull 碰不到 Claude Code 執行的那份副本，要另外更新。要不要更新？${ask}\n  更新：\n${update}`;
 }
 
@@ -164,17 +170,24 @@ export function bundledPluginActions(root: string, changedFiles: readonly string
   const readJson = (path: string): unknown => { try { return JSON.parse(readFileSync(path, 'utf8')); } catch { return undefined; } };
   const actions: string[] = [];
   for (const plugin of BUNDLED_PLUGINS) {
-    if (!changedFiles.some((name) => name.startsWith(`${plugin.dir}/`))) continue;
+    // git 對含非 ASCII 字元的路徑會加雙引號（core.quotePath），比對前把開頭的引號去掉。
+    if (!changedFiles.some((name) => name.replace(/^"/, '').startsWith(`${plugin.dir}/`))) continue;
     const manifest = readJson(join(root, plugin.dir, '.claude-plugin', 'plugin.json')) as { version?: unknown } | undefined;
     if (typeof manifest?.version !== 'string' || !manifest.version) continue;
     // 沒有 Claude Code 設定目錄就沒有人可問；目錄在但沒有安裝紀錄檔，是一個外掛都還沒裝。
     if (!existsSync(claudeDir)) continue;
     const recordPath = join(claudeDir, 'plugins', 'installed_plugins.json');
     const record = existsSync(recordPath) ? readJson(recordPath) as { plugins?: unknown } | undefined : { plugins: {} };
-    const plugins = record?.plugins && typeof record.plugins === 'object' ? record.plugins as Record<string, unknown> : null;
+    const plugins = record?.plugins && typeof record.plugins === 'object' && !Array.isArray(record.plugins) ? record.plugins as Record<string, unknown> : null;
     const entries = plugins?.[`${plugin.name}@${plugin.marketplace}`];
-    const installed = !plugins ? null
-      : Array.isArray(entries) ? entries.map((e) => (e as { version?: unknown })?.version).filter((v): v is string => typeof v === 'string') : [];
+    // 有這個外掛的紀錄、但形狀不對或缺版本：是「裝了、版本不明」，不能當成沒裝（稽核第 1 條）。
+    const copies = Array.isArray(entries) ? entries.map((e): InstalledCopy | null => {
+      const r = e as { version?: unknown; scope?: unknown; projectPath?: unknown } | null;
+      if (typeof r?.version !== 'string' || !r.version) return null;
+      return { version: r.version, where: typeof r.projectPath === 'string' && r.projectPath ? `project：${r.projectPath}` : typeof r.scope === 'string' ? r.scope : 'user' };
+    }) : null;
+    const installed = !plugins ? null : entries === undefined ? []
+      : copies && copies.every((c): c is InstalledCopy => c !== null) ? copies : null;
     const marketplaces = readJson(join(claudeDir, 'plugins', 'known_marketplaces.json'));
     const known = !!marketplaces && typeof marketplaces === 'object' && plugin.marketplace in marketplaces;
     const action = pluginAction(plugin, manifest.version, installed, known);

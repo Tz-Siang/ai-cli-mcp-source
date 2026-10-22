@@ -16,6 +16,16 @@
 
 - README（中英）派工面板一節改寫：說明 0.1.5 的表格與全機 job，並新增「更新：每台電腦要自己做」——面板不在 npm 套件裡、ai-cli 的自動更新（git pull）也碰不到 Claude Code 執行的 cache 副本，每台電腦要各自 `claude plugin marketplace update tkflyc-ai-cli` 再 `claude plugin update ai-cli-jobs@tkflyc-ai-cli` 並重開；註明這個 marketplace 是本 repo，不是 Anthropic 官方外掛目錄；附上選用的狀態列腳本。（Claude）
 
+- 自動更新帶進面板改版時，更新提示會請呼叫端 AI **問使用者要不要安裝或更新 ai-cli-jobs**（`src/core/updater.ts` 的 `bundledPluginActions`）。只在這次 pull 進來的 commit 動到 `plugins/ai-cli-jobs/` 時才比對：repo 的 `plugin.json` 版本對 Claude Code 的 `plugins/installed_plugins.json`（`CLAUDE_CONFIG_DIR` 或 `~/.claude`）。沒裝→問安裝（marketplace 沒加過就先加）；裝舊版→問更新，列出是哪一份（user 或哪個 project）舊；已是新版、或這次沒動到面板→不問；紀錄讀不到、形狀不對或缺版本→當成「版本不明」，安裝與更新兩種指令都給，不當成沒裝。提問接在既有「這次更新有 N 件事需要你動手」之後，並寫明「先問使用者，同意才執行」。背景：面板不在 npm 套件裡，git pull 也碰不到 Claude Code 執行的 cache 副本，自動更新完使用者不會知道面板要另外更新。（Claude）
+  - **獨立稽核**（Codex gpt-6.1-sol，medium，唯讀）提 7 條，逐條判讀：
+    成立並修正——① 有這個外掛的紀錄但缺版本（或 `plugins` 是陣列）時被濾成空陣列、錯報「還沒裝」，改為版本不明；
+    ③ 多份安裝只說版本不說是哪一份，改為列出 scope／project 路徑（稽核建議的 `--scope` 未採用：本機 `claude plugin update --help` 沒有這個參數）；
+    ④ 亂碼版本被解析成 0.0.0 而叫人更新，改為只比 `x.y.z`、解析不出來就不比；
+    ⑤ git 對非 ASCII 路徑加雙引號會漏比對，比對前去掉開頭引號（面板檔名都是 ASCII，屬低風險）；
+    ⑥ 有舊版但 marketplace 紀錄不見時更新指令會失敗，更新前也先加 marketplace；
+    ⑦ **測試假綠燈**：「沒動到面板就不問」原本在 Claude 設定目錄建立前斷言，是靠「沒有目錄」才回空陣列，移到有舊版紀錄之後並同時斷言動到面板時會問。
+    不成立——② 「`installed_plugins.json` 不存在就當成沒裝，違反讀不到不當成沒裝」：設定目錄在而這個檔不存在，就是一個外掛都還沒裝；即使判錯，後果只是多問一句要不要安裝，不會裝錯東西，維持原設計。
+
 ## [6.9.1] - 2026-10-20
 
 > Codex 唯讀 job 可以續接了：`run` 同時帶 `session_id` 與 `capabilities` 時，舊版把 `--sandbox` 傳給 `codex exec resume`，

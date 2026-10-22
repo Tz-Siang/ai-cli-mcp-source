@@ -8,6 +8,7 @@
  * 用法（建議）：不給路徑，harness 自己在系統暫存目錄建 worktree（HEAD），結束時自動收掉
  *   node tools/mutation-test.mjs
  *   node tools/mutation-test.mjs --script verify-update.mjs
+ *   node tools/mutation-test.mjs --script verify-update.mjs --name 面板   （只跑名稱含「面板」的）
  *   注意測的是 HEAD——還沒 commit 的改動不在裡面。收尾順序與失敗時的手動步驟見 cleanupTempWorktree()。
  *
  * 用法（手動指定 worktree，不會自動刪任何東西）：
@@ -93,8 +94,11 @@ const CONFIG_BAK = join(ROOT, '..', 'config.json.mutbak');
 
 /** 每個突變：改壞一處，期待某條斷言失敗。 */
 const selectedScript = process.argv.includes('--script') ? process.argv[process.argv.indexOf('--script') + 1] : undefined;
+// --name 只跑名稱含該字串的突變：一支 verify 腳本跑一次要數分鐘，只改了其中一段時不必全部重跑。
+const selectedName = process.argv.includes('--name') ? process.argv[process.argv.indexOf('--name') + 1] : undefined;
 const MUTATIONS = JSON.parse(readFileSync(new URL('./mutations.json', import.meta.url), 'utf-8'))
-  .filter((mutation) => !selectedScript || (mutation.script ?? 'verify-alias-config.mjs') === selectedScript);
+  .filter((mutation) => !selectedScript || (mutation.script ?? 'verify-alias-config.mjs') === selectedScript)
+  .filter((mutation) => !selectedName || mutation.name.includes(selectedName));
 if (!MUTATIONS.length) throw new Error('沒有符合的突變，拒絕空跑');
 
 /**

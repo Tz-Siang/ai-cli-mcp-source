@@ -324,20 +324,27 @@ try {
   // 沒裝或裝舊版的機器要在更新提示裡被問一次，已是新版的不該被打擾。
   await scenario('面板改版後問使用者安裝或更新', async () => {
     const jobs = { name: 'ai-cli-jobs', marketplace: 'tkflyc-ai-cli', repo: 'moerasermax/tkflyc-ai-cli', label: '面板' };
+    const v = (...versions) => versions.map((version) => ({ version, where: 'user' }));
     const notInstalled = pluginAction(jobs, '0.1.5', [], false);
     check('沒裝：問要不要安裝，先加 marketplace 再裝', !!notInstalled && notInstalled.includes('要不要安裝')
       && notInstalled.includes('claude plugin marketplace add moerasermax/tkflyc-ai-cli')
       && notInstalled.indexOf('marketplace add') < notInstalled.indexOf('claude plugin install ai-cli-jobs@tkflyc-ai-cli'));
     check('沒裝但 marketplace 已加過：不叫人重加', !pluginAction(jobs, '0.1.5', [], true).includes('marketplace add'));
-    const stale = pluginAction(jobs, '0.1.5', ['0.1.4'], true);
+    const stale = pluginAction(jobs, '0.1.5', v('0.1.4'), true);
     check('★ 裝舊版：問要不要更新，列出舊版號與兩步指令', !!stale && stale.includes('要不要更新') && stale.includes('0.1.4')
       && stale.includes('claude plugin marketplace update tkflyc-ai-cli') && stale.includes('claude plugin update ai-cli-jobs@tkflyc-ai-cli'));
     check('★ 每則都要求先問使用者、同意才做', [notInstalled, stale].every((a) => a.includes('先問使用者') && a.includes('同意才執行')));
-    check('★ 已是新版不問（不能變成每次都出現的噪音）', pluginAction(jobs, '0.1.5', ['0.1.5'], true) === null);
-    check('裝的比 repo 新也不問', pluginAction(jobs, '0.1.5', ['0.2.0'], true) === null);
-    check('版本逐段比數字，不是比字串（0.1.10 比 0.1.9 新）', pluginAction(jobs, '0.1.10', ['0.1.9'], true) !== null
-      && pluginAction(jobs, '0.1.9', ['0.1.10'], true) === null);
-    check('多份安裝（user＋project）任一份舊就問', pluginAction(jobs, '0.1.5', ['0.1.5', '0.1.3'], true)?.includes('0.1.3') === true);
+    check('★ 已是新版不問（不能變成每次都出現的噪音）', pluginAction(jobs, '0.1.5', v('0.1.5'), true) === null);
+    check('裝的比 repo 新也不問', pluginAction(jobs, '0.1.5', v('0.2.0'), true) === null);
+    check('版本逐段比數字，不是比字串（0.1.10 比 0.1.9 新）', pluginAction(jobs, '0.1.10', v('0.1.9'), true) !== null
+      && pluginAction(jobs, '0.1.9', v('0.1.10'), true) === null);
+    check('版本號解析不出來就不叫人更新（不當成 0.0.0）', pluginAction(jobs, '0.1.5', v('garbage'), true) === null
+      && pluginAction(jobs, 'garbage', v('0.1.4'), true) === null);
+    const lostMarket = pluginAction(jobs, '0.1.5', v('0.1.4'), false);
+    check('有舊版但 marketplace 紀錄不見：更新前先加 marketplace', !!lostMarket
+      && lostMarket.indexOf('marketplace add') >= 0 && lostMarket.indexOf('marketplace add') < lostMarket.indexOf('marketplace update'));
+    const mixed = pluginAction(jobs, '0.1.5', [{ version: '0.1.5', where: 'user' }, { version: '0.1.3', where: 'project：D:/proj' }], true);
+    check('多份安裝（user＋project）任一份舊就問，並說出是哪一份', !!mixed && mixed.includes('0.1.3（project：D:/proj）') && !mixed.includes('0.1.5（user）'));
     const unknown = pluginAction(jobs, '0.1.5', null, true);
     check('讀不到安裝紀錄：不當成沒裝，安裝與更新兩種都給', !!unknown && unknown.includes('讀不到') && unknown.includes('claude plugin update')
       && unknown.includes('claude plugin install'));
@@ -348,7 +355,6 @@ try {
     mkdirSync(join(root, 'plugins/ai-cli-jobs/.claude-plugin'), { recursive: true });
     writeFileSync(join(root, 'plugins/ai-cli-jobs/.claude-plugin/plugin.json'), JSON.stringify({ name: 'ai-cli-jobs', version: '0.1.5' }));
     const touched = ['plugins/ai-cli-jobs/hooks/register.tsx'];
-    check('★ 這次更新沒動到面板就不問', bundledPluginActions(root, ['src/core/updater.ts', 'plugins/other/x.ts'], claude).length === 0);
     check('沒有 Claude Code 設定目錄就沒有人可問', bundledPluginActions(root, touched, join(base, 'no-claude')).length === 0);
     mkdirSync(join(claude, 'plugins'), { recursive: true });
     check('設定目錄在、沒有安裝紀錄檔：當成沒裝', bundledPluginActions(root, touched, claude)[0]?.includes('要不要安裝') === true);
@@ -358,7 +364,17 @@ try {
     const fresh = bundledPluginActions(root, touched, claude);
     check('紀錄裡沒有這個外掛：問安裝，marketplace 已知就不叫人加', fresh.length === 1 && fresh[0].includes('要不要安裝') && !fresh[0].includes('marketplace add'));
     write('installed_plugins.json', { version: 2, plugins: { 'ai-cli-jobs@tkflyc-ai-cli': [{ scope: 'user', version: '0.1.4' }] } });
-    check('★ 紀錄是 0.1.4、repo 是 0.1.5：問更新', bundledPluginActions(root, touched, claude)[0]?.includes('0.1.4') === true);
+    check('★ 紀錄是 0.1.4、repo 是 0.1.5：問更新', bundledPluginActions(root, touched, claude)[0]?.includes('0.1.4（user）') === true);
+    // 同一份舊版紀錄下，只差在這次更新有沒有動到面板——不能靠「沒有設定目錄」之類的別的原因過關。
+    check('★ 這次更新沒動到面板就不問', bundledPluginActions(root, ['src/core/updater.ts', 'plugins/other/x.ts'], claude).length === 0
+      && bundledPluginActions(root, touched, claude).length === 1);
+    check('git 給加引號的路徑（含非 ASCII 字元）也認得', bundledPluginActions(root, ['"plugins/ai-cli-jobs/\\346\\226\\207.md"'], claude).length === 1);
+    write('installed_plugins.json', { version: 2, plugins: { 'ai-cli-jobs@tkflyc-ai-cli': [{ scope: 'user' }] } });
+    check('有這個外掛的紀錄但沒有版本：當成版本不明，不當成沒裝', bundledPluginActions(root, touched, claude)[0]?.includes('讀不到') === true);
+    write('installed_plugins.json', { version: 2, plugins: { 'ai-cli-jobs@tkflyc-ai-cli': [{ scope: 'user', version: '0.1.5' }, { scope: 'project' }] } });
+    check('一份新版、一份沒有版本：仍要問（不明的那份可能是舊的）', bundledPluginActions(root, touched, claude)[0]?.includes('讀不到') === true);
+    write('installed_plugins.json', { version: 2, plugins: [] });
+    check('plugins 是陣列（形狀不對）：當成讀不到', bundledPluginActions(root, touched, claude)[0]?.includes('讀不到') === true);
     write('installed_plugins.json', { version: 2, plugins: { 'ai-cli-jobs@tkflyc-ai-cli': [{ scope: 'user', version: '0.1.5' }] } });
     check('紀錄已是 0.1.5：不問', bundledPluginActions(root, touched, claude).length === 0);
     write('installed_plugins.json', '{broken');
