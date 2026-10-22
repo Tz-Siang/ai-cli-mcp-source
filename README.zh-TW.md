@@ -745,8 +745,20 @@ Codex 的 `query_usage` 不論 fresh 與否，都先用 `codex app-server` stdio
 
 ## Claude Code 派工面板（選用外掛）
 
-`ai-cli-jobs` 外掛會在輸入框上方顯示 job 列表，並在下方提示行顯示一行摘要。
-每筆 job 顯示狀態、agent、model 與 effort、任務摘要、經過時間及最後事件。
+`ai-cli-jobs` 外掛會在輸入框上方用表格列出 job，並在下方提示行顯示一行摘要。
+表格欄位是「狀態／來源／模型／任務／時間」：狀態寫成文字（✅ 成功、❌ 失敗、
+❔ 中斷＝行程消失但沒留下結果、➖ 不追蹤），模型前的色點代表廠商
+（🟠 claude、🟢 codex、⚫ grok、🔵 gemini、🟣 其他 API），執行中顯示「已跑 m:ss」，
+完成顯示「N 分前」。
+
+- **這個對話派的 job**：有 job 執行中時每 0.5 秒輪詢 `list_processes`，完成後留 2 分鐘。
+- **其他對話、子代理、其他專案的 job**：每 5 秒直接讀 job store
+  （`AI_CLI_STATE_DIR` 或 `~/.local/state/ai-cli/jobs/`），來源欄標「同專案」或「其他專案」，
+  完成後留 10 分鐘；stdout 超過 5 分鐘沒動會標 💤。本對話子代理派的 job 在紀錄裡分不出來，歸在「同專案」。
+
+兩者都不花模型 token。前提是 ai-cli 的 MCP server 名稱設定為 `ai-cli`。
+
+### 安裝
 
 在 Claude Code 終端機 session 的輸入框執行：
 
@@ -755,11 +767,23 @@ Codex 的 `query_usage` 不論 fresh 與否，都先用 `codex app-server` stdio
 ```
 
 它會先詢問是否加入 marketplace，按 `y`，再選擇安裝 scope。
-前提是 ai-cli 的 MCP server 名稱設定為 `ai-cli`。
+這個 marketplace 就是本 repo（`.claude-plugin/marketplace.json`），**不是** Anthropic 的官方外掛目錄。
 
-面板只顯示「該 session 派出的 job」；有 job 執行中時，每 0.5 秒輪詢一次
-`list_processes`，不花模型 token。要看所有 session，請在另一個終端機使用
-`ai-cli jobs --watch`。
+### 更新：每台電腦要自己做
+
+**面板不跟著 ai-cli 一起更新。** 它不在 npm 套件裡（`package.json` 的 `files` 不收 `plugins/`），
+ai-cli 的自動更新（git pull）也碰不到它：Claude Code 執行的是安裝當下複製到
+`~/.claude/plugins/cache/` 的副本。每台電腦要自己裝一次，之後每次改版各自更新：
+
+```text
+claude plugin marketplace update tkflyc-ai-cli
+claude plugin update ai-cli-jobs@tkflyc-ai-cli
+```
+
+更新後重開 Claude Code 才生效；`claude plugin list` 看得到目前裝的版本。
+也可以在 Claude Code 裡開 `/plugin` 選單更新。
+
+### auto 權限模式與解除安裝
 
 如果 Claude Code 使用 `auto` 權限模式，請在 `~/.claude/settings.json` 的
 `permissions.allow` 加入 `mcp__ai-cli__list_processes`。面板是在背景輪詢，
@@ -771,6 +795,13 @@ Codex 的 `query_usage` 不論 fresh 與否，都先用 `codex app-server` stdio
 ```text
 /plugin uninstall ai-cli-jobs@tkflyc-ai-cli
 ```
+
+### 選用：底部狀態列
+
+不想裝外掛、或想在 MCP 斷線時仍看得到全機 job，可以改用
+`tools/statusline/ai-cli-status.mjs`：它是 Claude Code 的 `statusLine` 指令，
+直接讀 job store，在畫面底部印一行。啟用方式寫在檔頭（在 `~/.claude/settings.json`
+加 `statusLine` 欄位）。它同樣不在 npm 套件裡，要從 git 取得。
 
 ## 等待端怎麼知道 AI 還活著
 

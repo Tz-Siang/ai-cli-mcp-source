@@ -518,22 +518,54 @@ keys and return an error. This does not alter the user's global configuration.
 
 ## Claude Code job panel（optional plugin）
 
-The `ai-cli-jobs` plugin shows a job list above the input box and a one-line
-summary in the hint line below it. Each job shows its status, agent, model and
-reasoning effort, task summary, elapsed time, and last event.
+The `ai-cli-jobs` plugin shows jobs as a table above the input box and a one-line
+summary in the hint line below it. The columns are status, source, model, task
+and time: the status is spelled out (✅ 成功 done, ❌ 失敗 failed, ❔ 中斷 lost = the
+process vanished without a result, ➖ 不追蹤 untracked), a coloured dot before the
+model marks the vendor (🟠 claude, 🟢 codex, ⚫ grok, 🔵 gemini, 🟣 other APIs), a
+running job shows its elapsed time and a finished one how long ago it ended.
 
-Install from the prompt in a Claude Code terminal session:
+- **Jobs this session dispatched**: polled through `list_processes` every 0.5
+  seconds while any is running; a finished one stays 2 minutes.
+- **Jobs from other sessions, subagents and other projects**: read straight from
+  the job store (`AI_CLI_STATE_DIR` or `~/.local/state/ai-cli/jobs/`) every 5
+  seconds, the source column saying same project or other project; a finished
+  one stays 10 minutes, and 💤 marks a running job whose stdout has not moved for
+  5 minutes. A job this session's subagent dispatched cannot be told apart in the
+  store and counts as same project.
+
+Neither consumes model tokens. The ai-cli MCP server must be configured with the
+name `ai-cli`.
+
+### Install
+
+From the prompt in a Claude Code terminal session:
 
 ```text
 /plugin install ai-cli-jobs --marketplace moerasermax/tkflyc-ai-cli
 ```
 
 When asked whether to add the marketplace, press `y`, then select the install
-scope. The ai-cli MCP server must be configured with the name `ai-cli`.
+scope. That marketplace is this repository (`.claude-plugin/marketplace.json`),
+**not** Anthropic's official plugin directory.
 
-The panel only shows jobs dispatched by that session. It polls `list_processes`
-every 0.5 seconds while jobs are running, without consuming model tokens. To watch
-jobs across all sessions, use `ai-cli jobs --watch` in another terminal.
+### Updating: on every machine, by hand
+
+**The panel does not update with ai-cli.** It is not in the npm package
+(`files` in `package.json` leaves out `plugins/`), and ai-cli's auto-update (a
+git pull) does not reach it either: Claude Code runs the copy it placed in
+`~/.claude/plugins/cache/` at install time. Install it once on each machine,
+then update it there after each release:
+
+```text
+claude plugin marketplace update tkflyc-ai-cli
+claude plugin update ai-cli-jobs@tkflyc-ai-cli
+```
+
+Restart Claude Code for the update to apply; `claude plugin list` shows the
+installed version. The `/plugin` menu inside Claude Code does the same.
+
+### `auto` permission mode and uninstalling
 
 If Claude Code runs in `auto` permission mode, add `mcp__ai-cli__list_processes`
 to `permissions.allow` in `~/.claude/settings.json`. The panel polls in the
@@ -545,6 +577,14 @@ Uninstall from the Claude Code prompt:
 ```text
 /plugin uninstall ai-cli-jobs@tkflyc-ai-cli
 ```
+
+### Optional: a status line instead
+
+Without the plugin, or to keep seeing every job while the MCP is disconnected,
+use `tools/statusline/ai-cli-status.mjs`: a Claude Code `statusLine` command that
+reads the job store and prints one line at the bottom of the screen. Its header
+says how to enable it (a `statusLine` entry in `~/.claude/settings.json`). It is
+not in the npm package either; get it from git.
 
 ## Adding an AI agent
 
