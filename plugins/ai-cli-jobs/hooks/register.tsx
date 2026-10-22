@@ -1,9 +1,16 @@
 import { atom, read, update } from 'claude-code'
 import type { Register, EngineInterface, Timer } from 'claude-code'
-import type { AiCliJobsJob } from '../types/index'
+import type { AiCliJobsJob, AiCliJobsMachineJob } from '../types/index'
 
 const jobs = atom({ plugin: 'ai-cli-jobs', key: 'jobs' } as const, [])
+/** Every session's jobs, read from the job store on disk: `list_processes` only answers for this server. */
+const machine = atom({ plugin: 'ai-cli-jobs', key: 'machine' } as const, [])
 const RETAIN_MS = 120_000
+export const SCAN_MS = 5_000
+/** A finished job from elsewhere stays this long; the server deletes its folder after 30 minutes. */
+export const RECENT_MS = 10 * 60_000
+/** A running job whose stdout has not moved for this long gets the 💤 note. */
+export const QUIET_MS = 5 * 60_000
 export const POLL_MS = 500
 /** A list_processes call that has not answered by then is abandoned, so it cannot hold `busy` forever. */
 export const CALL_TIMEOUT_MS = 10_000
@@ -68,12 +75,71 @@ export function taskLabel(input: Record<string, unknown>): string {
   }
   return 'ai-cli 任務'
 }
-export function summary(list: AiCliJobsJob[]): string {
+export function summary(list: AiCliJobsJob[], othersRunning = 0): string {
   const labels = [['running', '執行中'], ['completed', '完成'], ['failed', '失敗'], ['untracked', '已不追蹤']] as const
-  return 'ai-cli ▸ ' + labels.map(([status, label]) => {
+  return 'ai-cli ▸ ' + [...labels.map(([status, label]) => {
     const n = list.filter(j => j.status === status).length
     return n ? `${n} ${label}` : ''
-  }).filter(Boolean).join(' · ')
+  }), othersRunning ? `其他 ${othersRunning} 執行中` : ''].filter(Boolean).join(' · ')
+}
+export function ago(ms: number): string {
+  const m = Math.floor(Math.max(0, ms) / 60_000)
+  return m < 1 ? '剛剛' : `${m} 分前`
+}
+const norm = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+/**
+ * Folds one job folder of the store into a row. `endMtime` stands in when the end record carries no endTime.
+ * The fields are the server's own (src/core/job-store.ts): change them there and this reader goes blind.
+ */
+export function machineJob(jobId: string, meta: unknown, exit: unknown, lost: unknown,
+  outputAt: number | undefined, here: string, endMtime?: number): AiCliJobsMachineJob | undefined {
+  const m = record(meta)
+  if (!m) return undefined
+  const model = str(m.resolvedModel) || str(m.model) || str(m.agent) || 'default'
+  const folder = str(m.projectDir) || str(m.workFolder)
+  const p = norm(folder), h = norm(here)
+  const project = p && h && p !== h && !h.startsWith(p + '/') ? folder.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || folder : ''
+  const x = record(exit), l = record(lost)
+  const status: AiCliJobsMachineJob['status'] = x ? (x.exitCode === 0 && x.killed !== true && x.timedOut !== true ? 'ok' : 'bad') : l ? 'lost' : 'running'
+  const end = x ?? l
+  return {
+    jobId, pid: typeof m.pid === 'number' ? m.pid : undefined, agent: str(m.agent) || inferAgent(model), model,
+    effort: str(m.effort), task: taskLabel({ prompt: str(m.task) }), project, status,
+    startedAt: Date.parse(str(m.startTime)) || 0, outputAt,
+    ...(end ? { endedAt: Date.parse(str(end.endTime)) || endMtime || 0 } : {}),
+  }
+}
+const DOTS: Record<string, string> = { claude: '🟠', codex: '🟢', grok: '⚫', antigravity: '🔵', 'direct-api': '🟣' }
+type Row = { key: string, kind: 'running' | 'ok' | 'bad' | 'lost' | 'gone', model: string, source: string, task: string, time: string, wrap: boolean }
+/** This session's rows first, then everyone else's; running before finished, the newest finish first. */
+export function tableRows(own: AiCliJobsJob[], others: AiCliJobsMachineJob[], now: number): Row[] {
+  const modelText = (agent: string, model: string, effort: string) => `${DOTS[agent] ?? '⚪'} ${model}${effort ? `·${effort}` : ''}`
+  const mine = new Set(own.map(j => j.pid))
+  const rows: (Row & { at: number })[] = own.map(j => {
+    const kind = j.status === 'running' ? 'running' : j.status === 'completed' ? 'ok' : j.status === 'failed' ? 'bad' : 'gone'
+    const seconds = kind === 'running' ? Math.max(j.elapsedSec, (now - j.startedAt) / 1000) : j.elapsedSec
+    const poll = isPollFailure(j.lastEvent)
+    const note = poll ? j.lastEvent : eventLabel(j.lastEvent)
+    return {
+      key: `own-${j.pid}`, kind, model: modelText(j.agent, j.model, j.reasoningEffort), source: '這個對話',
+      task: [j.task, note].filter(Boolean).join('  ·  '), wrap: poll, at: j.finishedAt ?? now,
+      time: kind === 'running' ? `已跑 ${elapsed(seconds)}` : ago(now - (j.finishedAt ?? now)),
+    }
+  })
+  for (const j of others) {
+    if (j.pid !== undefined && mine.has(j.pid)) continue
+    const quiet = j.status === 'running' && j.outputAt !== undefined && now - j.outputAt > QUIET_MS
+      ? `💤 ${Math.floor((now - j.outputAt) / 60_000)} 分沒輸出` : ''
+    rows.push({
+      key: `job-${j.jobId}`, kind: j.status, model: modelText(j.agent, j.model, j.effort), source: j.project ? '其他專案' : '同專案',
+      task: [j.project ? `［${j.project}］` : '', j.task, quiet].filter(Boolean).join(' '), wrap: false, at: j.endedAt ?? now,
+      time: j.status === 'running' ? `已跑 ${elapsed((now - j.startedAt) / 1000)}` : ago(now - (j.endedAt ?? now)),
+    })
+  }
+  const order = (r: Row & { at: number }) => r.kind === 'running' ? 0 : 1
+  return rows.map((r, i) => ({ r, i }))
+    .sort((a, b) => order(a.r) - order(b.r) || (order(a.r) ? b.r.at - a.r.at : a.i - b.i))
+    .map(({ r: { at, ...row } }) => row)
 }
 export function eventLabel(text: string): string {
   return clip(text.replace(/^(?:item|turn|thread)\.[\w.-]+\s+/g, ''), 28)
@@ -85,7 +151,7 @@ export function eventLabel(text: string): string {
 export function failureText(why: string): string {
   // auto mode's background refusal is the usual cause, but a hook or a declined ask refuses the same way, so keep its reason.
   const refused = why.match(/\$\.mcp\.call\([^)]*\) refused:?\s*(.*)$/s)
-  if (refused) return `輪詢被拒：把 mcp__ai-cli__list_processes 加進 permissions.allow（原因：${clip(refused[1], 40) || '未提供'}）`
+  if (refused) return `輪詢被拒：把 mcp__ai-cli__list_processes 加進 permissions.allow（原因：${clip(refused[1] ?? '', 40) || '未提供'}）`
   // A permissions.deny rule drops the tool from the session, so it lands here, not as a refusal (Claude Code 2.1.296).
   if (/no connected MCP tool\b/.test(why)) return '輪詢失敗：找不到 mcp__ai-cli__list_processes：ai-cli 未連線（用 /mcp 重連，server 名稱須為 ai-cli），或被 permissions.deny 擋下'
   return `輪詢失敗：${clip(why, 80) || '未知錯誤'}`
@@ -123,13 +189,59 @@ export const DISCOVER_EVERY_MS = 60_000
   let poll: Timer | undefined
   let expiry: Timer | undefined
   let discovery: Timer[] = []
+  let scanner: Timer | undefined
   let busy = false
+  let scanning = false
   let generation = 0
   /** Adopted jobs already shown once, so one that was pruned is not brought back while the server still lists it. */
   const seen = new Set<string>()
+  /** meta.json never changes once written, so each job's is read once. */
+  const metas = new Map<string, unknown>()
   function stop() {
-    poll?.cancel(); expiry?.cancel(); for (const t of discovery) t.cancel()
-    poll = undefined; expiry = undefined; discovery = []
+    poll?.cancel(); expiry?.cancel(); scanner?.cancel(); for (const t of discovery) t.cancel()
+    poll = undefined; expiry = undefined; scanner = undefined; discovery = []
+  }
+  const readJson = ($: EngineInterface, path: string) => $.fs.read(path).then(t => JSON.parse(t) as unknown, () => undefined)
+  /** Reads the job store the server writes (src/core/live-jobs.ts jobStateDir): no MCP, so other sessions' jobs show too. */
+  async function scan($: EngineInterface) {
+    if (scanning) return
+    scanning = true
+    const epoch = generation
+    try {
+      const dir = await $.env.get('AI_CLI_STATE_DIR')
+      const home = (await $.env.get('USERPROFILE')) || (await $.env.get('HOME')) || ''
+      const root = `${dir || `${home}/.local/state/ai-cli`}/jobs`
+      const here = await $.session.root()
+      const now = await $.clock.now()
+      const folders = await $.fs.list(root).catch(() => [])
+      const found: AiCliJobsMachineJob[] = []
+      for (const folder of folders) {
+        if (folder.kind !== 'dir') continue
+        const path = `${root}/${folder.name}`
+        const files = await $.fs.list(path).catch(() => undefined)
+        if (!files) continue
+        const file = (name: string) => files.find(f => f.name === name)
+        const exitFile = file('exit.json'), lostFile = file('lost.json')
+        const endFile = exitFile ?? lostFile
+        // Finished long ago: skip the reads; the server deletes the folder later.
+        if (endFile && now - endFile.mtimeMs > RECENT_MS) continue
+        if (!metas.has(folder.name)) {
+          const meta = await readJson($, `${path}/meta.json`)
+          if (meta === undefined) continue
+          metas.set(folder.name, meta)
+        }
+        const exit = exitFile ? await readJson($, `${path}/exit.json`) : undefined
+        const lost = !exitFile && lostFile ? await readJson($, `${path}/lost.json`) : undefined
+        const job = machineJob(folder.name, metas.get(folder.name), exit, lost, file('stdout.log')?.mtimeMs || undefined, here, endFile?.mtimeMs)
+        if (job && (job.status === 'running' || now - (job.endedAt ?? 0) <= RECENT_MS)) found.push(job)
+      }
+      for (const key of metas.keys()) if (!folders.some(f => f.name === key)) metas.delete(key)
+      if (epoch === generation) await update($, machine, () => found)
+    } catch {
+      // A store that cannot be read shows nothing from elsewhere; this session's own rows still come from MCP.
+    } finally {
+      scanning = false
+    }
   }
   async function synchronize($: EngineInterface) {
     const held = await read($, jobs)
@@ -222,16 +334,22 @@ export const register: Register = on => {
     const epoch = generation
     await prune($)
     for (const t of discovery) t.cancel()
+    scanner?.cancel(); scanner = undefined
     discovery = epoch !== generation ? [] : [
       ...DISCOVER_EARLY_MS.map(ms => $.clock.after(ms, () => { void refresh($) })),
       $.clock.every(DISCOVER_EVERY_MS, () => { void refresh($) }),
     ]
+    if (epoch === generation) {
+      scanner = $.clock.every(SCAN_MS, () => { void scan($) })
+      void scan($)
+    }
     return next(e)
   })
   on('session.end', async ($, e, next) => {
     // `seen` outlives the session: /clear ends it with no new start, and the server keeps listing adopted jobs.
     generation++; stop()
     await update($, jobs, () => [])
+    await update($, machine, () => [])
     return next(e)
   })
   on('tool.call', { tool: 'mcp__ai-cli__run' }, async ($, e, next) => {
@@ -251,23 +369,35 @@ export const register: Register = on => {
     return result
   })
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    const list = await read($, jobs)
-    if (e.props.hasSurvey || !list.length) return next(e)
     const now = await $.clock.now()
+    const rows = tableRows(await read($, jobs), await read($, machine), now)
+    if (e.props.hasSurvey || !rows.length) return next(e)
     const { Box, Text } = $.ui.resolve(e)
-    return <Box flexDirection="column" backgroundColor={COLORS.list} paddingX={1}>{list.map(j => {
-      const glyph = j.status === 'running' ? SPINNER[Math.floor(now / POLL_MS) % SPINNER.length] :
-        j.status === 'completed' ? '✓' : j.status === 'failed' ? '✗' : '–'
-      const seconds = j.status === 'running' ? Math.max(j.elapsedSec, (now - j.startedAt) / 1000) : j.elapsedSec
-      const background = j.status === 'running' ? COLORS.running : j.status === 'completed' ? COLORS.completed : COLORS.failed
-      return <Box key={`job-${j.pid}`} backgroundColor={background}>
-        <Text color={COLORS.text} bold>{`${glyph} ${j.agent}  ${j.model}${j.reasoningEffort ? ` (${j.reasoningEffort})` : ''}  ${j.task}  ${elapsed(seconds)}  ${isPollFailure(j.lastEvent) ? j.lastEvent : eventLabel(j.lastEvent)}`}</Text>
-      </Box>
-    })}</Box>
+    const spinner = SPINNER[Math.floor(now / POLL_MS) % SPINNER.length]
+    const STATUS = { running: `${spinner} 執行`, ok: '✅ 成功', bad: '❌ 失敗', lost: '❔ 中斷', gone: '➖ 不追蹤' } as const
+    const BACKGROUND = { running: COLORS.running, ok: COLORS.completed, bad: COLORS.failed, lost: COLORS.failed, gone: COLORS.failed } as const
+    // Fixed cell widths keep the columns lined up whatever the CJK and emoji widths; the task takes what is left.
+    const cells = (status: string, source: string, model: string, task: string, time: string, wrap: boolean, bold: boolean) => [
+      <Box key="status" width={10} flexShrink={0}><Text color={COLORS.text} bold={bold}>{status}</Text></Box>,
+      <Box key="source" width={10} flexShrink={0}><Text color={COLORS.text} bold={bold}>{source}</Text></Box>,
+      <Box key="model" width={26} flexShrink={0}><Text color={COLORS.text} bold={bold} wrap="truncate-end">{model}</Text></Box>,
+      <Box key="task" flexGrow={1}><Text color={COLORS.text} bold={bold} wrap={wrap ? 'wrap' : 'truncate-end'}>{task}</Text></Box>,
+      <Box key="time" width={12} flexShrink={0} justifyContent="flex-end"><Text color={COLORS.text} bold={bold}>{time}</Text></Box>,
+    ]
+    const running = rows.filter(r => r.kind === 'running').length
+    return <Box flexDirection="column" backgroundColor={COLORS.list} paddingX={1}>
+      <Box key="title"><Text color={COLORS.text} bold>{`🤖 ai-cli 背景工作（執行中 ${running} · 剛完成 ${rows.length - running}）`}</Text></Box>
+      <Box key="head" flexDirection="row">{cells('狀態', '來源', '模型', '任務／專案', '時間', false, false)}</Box>
+      {rows.map(r => <Box key={r.key} flexDirection="row" backgroundColor={BACKGROUND[r.kind]}>
+        {cells(STATUS[r.kind], r.source, r.model, r.task, r.time, r.wrap, true)}
+      </Box>)}
+    </Box>
   })
   on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
     const list = await read($, jobs)
-    if (!list.length) return next(e)
-    return next({ ...e, props: { ...e.props, tail: [e.props.tail, summary(list)].filter(Boolean).join(' · ') } })
+    const mine = new Set(list.map(j => j.pid))
+    const others = (await read($, machine)).filter(j => j.status === 'running' && (j.pid === undefined || !mine.has(j.pid))).length
+    if (!list.length && !others) return next(e)
+    return next({ ...e, props: { ...e.props, tail: [e.props.tail, summary(list, others)].filter(Boolean).join(' · ') } })
   })
 }

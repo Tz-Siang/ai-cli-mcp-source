@@ -12,6 +12,8 @@
 
 - `tools/statusline/ai-cli-status.mjs`：Claude Code statusLine 腳本，直接讀 job store（`meta.json`／`exit.json`／`lost.json`）顯示**全機**執行中與近 10 分鐘完成的 job，含模型與 effort、經過時間、stdout 超過 5 分鐘沒動的「靜默」標記、其他專案的 job 附專案名；完成數依 ✓／✗／?（lost）分項計數，失敗不會被收進「+N」看不到。背景：`ai-cli-jobs` 面板只列本 session 主對話派的 job、完成後 120 秒消失，看不到子代理與其他專案的 worker。不經 MCP、不寫任何檔，每次約 55 ms；啟用方式寫在檔頭。不隨 npm 套件散布，改 job store 格式時要一起改它。（Claude）
 
+- ai-cli-jobs 面板 0.1.5：輸入框上方改成表格（狀態／來源／模型／任務／時間，有欄位標題），狀態用文字寫出（✅ 成功、❌ 失敗、❔ 中斷、➖ 不追蹤），模型前加廠商色點，執行中寫「已跑 m:ss」、完成寫「N 分前」。另每 5 秒用 `$.fs` 讀 job store，把**其他 session、子代理與其他專案**的 job 一起列出（來源欄標「同專案／其他專案」，完成後留 10 分鐘，stdout 超過 5 分鐘沒動標 💤）；本 session 已列的 pid 不重複。背景：舊面板一列擠成一句、只有符號，使用者反映看不懂；而 `list_processes` 只回本 server 的 job，其他 session 的 worker 看不到。測試 16 支全過，其中 4 支在 HEAD 上就因 Claude Code 2.1.308 在畫面樹多帶 `part` 欄位而紅，改為只比對樹本身；「略過舊資料夾」「pid 去重」兩處各做一次突變，都被新測試抓到。（Claude）
+
 ## [6.9.1] - 2026-10-20
 
 > Codex 唯讀 job 可以續接了：`run` 同時帶 `session_id` 與 `capabilities` 時，舊版把 `--sandbox` 傳給 `codex exec resume`，

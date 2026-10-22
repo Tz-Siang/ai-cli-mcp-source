@@ -11,8 +11,25 @@ export type AiCliJobsJob = {
   lastEvent: string
   finishedAt?: number
 }
+/** A job read straight from the job store on disk: any session's, subagents' and other projects' included. */
+export type AiCliJobsMachineJob = {
+  jobId: string
+  pid?: number
+  agent: string
+  model: string
+  effort: string
+  task: string
+  /** The job's project folder name when it is not this session's project, else ''. */
+  project: string
+  /** lost = the server found the process gone with no exit record: neither success nor failure. */
+  status: 'running' | 'ok' | 'bad' | 'lost'
+  startedAt: number
+  endedAt?: number
+  /** When stdout.log was last written; undefined when there is none. */
+  outputAt?: number
+}
 declare module 'claude-code' {
   interface PluginState {
-    'ai-cli-jobs': { jobs: AiCliJobsJob[] }
+    'ai-cli-jobs': { jobs: AiCliJobsJob[]; machine: AiCliJobsMachineJob[] }
   }
 }

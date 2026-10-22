@@ -1,8 +1,10 @@
 import type { AiCliJobsJob } from '../types/index'
 import { test, expect, mock } from 'claude-code/testing'
-import { taskLabel, runPid, elapsed, eventLabel, failureText, inferAgent, POLL_MS, CALL_TIMEOUT_MS, ADOPTED_TASK, DISCOVER_EARLY_MS } from '../hooks/register'
+import { taskLabel, runPid, elapsed, eventLabel, failureText, inferAgent, machineJob, ago, POLL_MS, CALL_TIMEOUT_MS, ADOPTED_TASK, DISCOVER_EARLY_MS, SCAN_MS, RECENT_MS, QUIET_MS } from '../hooks/register'
 
 const tree = (text: string) => ({ type: 'Text' as const, props: {}, children: [text] })
+// The engine tags a drawn tree with the plugin that drew it (`part`, Claude Code 2.1.308); compare the tree alone.
+const shown = (text: string) => expect.objectContaining(tree(text))
 const ref = { plugin: 'ai-cli-jobs', key: 'jobs' } as const
 const band = { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 100, scroll: { offset: 0, bodyRows: 10 }, view: {} }
 
@@ -20,14 +22,14 @@ test('polls every POLL_MS and advances the spinner each tick', async ($, on) => 
   await clock.advance(1)
   expect(calls).toBe(1)
   const ui = await $.ui.mount({ plugin: 'ai-cli-jobs', surface: 'terminal', component: 'AbovePrompt', props: band })
-  expect((await ui.find({ type: 'Text' }))?.text).toContain('⠙')
+  expect(await ui.find({ type: 'Text', text: /⠙ 執行/ })).toBeDefined()
   await ui.unmount()
   await clock.advance(POLL_MS - 1)
   expect(calls).toBe(1)
   await clock.advance(1)
   expect(calls).toBe(2)
   const nextUi = await $.ui.mount({ plugin: 'ai-cli-jobs', surface: 'terminal', component: 'AbovePrompt', props: band })
-  expect((await nextUi.find({ type: 'Text' }))?.text).toContain('⠹')
+  expect(await nextUi.find({ type: 'Text', text: /⠹ 執行/ })).toBeDefined()
   await nextUi.unmount()
 })
 
@@ -48,17 +50,21 @@ test('band and status rows use Morandi backgrounds and bold dark text on both su
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ plugin: 'ai-cli-jobs', surface, component: 'AbovePrompt', props: band })
     const boxes = await ui.findAll({ type: 'Box' })
-    expect(boxes.map(b => b.props.backgroundColor)).toEqual(['#E8DCB5', '#A8D5CE', '#DDE6A3', '#F4BE86', '#F4BE86', '#F4BE86'])
+    expect(boxes.map(b => b.props.backgroundColor).filter(Boolean)).toEqual(['#E8DCB5', '#A8D5CE', '#DDE6A3', '#F4BE86', '#F4BE86', '#F4BE86'])
     expect(boxes[0]?.props.paddingX).toBe(1)
     const texts = await ui.findAll({ type: 'Text' })
-    expect(texts.length).toBe(5)
+    // A title, a header row of 5 column names, then 5 cells per job.
+    expect(texts.length).toBe(1 + 5 + 5 * 5)
+    expect(texts[0]?.text).toBe('🤖 ai-cli 背景工作（執行中 1 · 剛完成 4）')
+    expect(texts.slice(1, 6).map(t => t.text)).toEqual(['狀態', '來源', '模型', '任務／專案', '時間'])
     expect(texts.every(t => t.props.color === '#1A1A1A')).toBe(true)
-    expect(texts.every(t => t.props.bold === true)).toBe(true)
-    expect(texts[3]?.text).toContain('killed')
-    expect(texts[4]?.text).toContain('已不追蹤')
+    expect(texts.filter(t => t.props.bold === true).length).toBe(1 + 5 * 5)
+    expect(texts.filter(t => t.text === '❌ 失敗').length).toBe(2)
+    expect(await ui.find({ type: 'Text', text: /killed/ })).toBeDefined()
+    expect(texts.filter(t => t.text === '➖ 不追蹤').length).toBe(1)
     await ui.unmount()
     // The tail stays plain text with no background or foreground styles.
-    expect(await $.ui.render({ surface, component: 'PromptHint', requestId: 'color-hint', props: { isDraft: false, isWorking: false, hint: 'base' } })).toEqual(tree('ai-cli ▸ 1 執行中 · 1 完成 · 2 失敗 · 1 已不追蹤'))
+    expect(await $.ui.render({ surface, component: 'PromptHint', requestId: 'color-hint', props: { isDraft: false, isWorking: false, hint: 'base' } })).toEqual(shown('ai-cli ▸ 1 執行中 · 1 完成 · 2 失敗 · 1 已不追蹤'))
   }
 })
 
@@ -97,8 +103,9 @@ test('infers initial agent from model without an agent argument', async ($, on) 
   // Both surfaces show the correct agent before the first poll.
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ plugin: 'ai-cli-jobs', surface, component: 'AbovePrompt', props: band })
-    expect(await ui.find({ type: 'Text', text: /claude  haiku/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /antigravity  gemini-pro/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^🟠 haiku$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^🔵 gemini-pro$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^🟢 gpt-6\.1-sol$/ })).toBeDefined()
     await ui.unmount()
   }
 })
@@ -132,9 +139,10 @@ test('unknown terminal statuses and invalid pids do not block other poll updates
   expect(held.slice(1).every(j => j.finishedAt === POLL_MS)).toBe(true)
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ plugin: 'ai-cli-jobs', surface, component: 'AbovePrompt', props: band })
-    expect((await ui.find({ type: 'Text', text: /killed/ }))?.text).toContain('✗')
-    expect((await ui.find({ type: 'Text', text: /cancelled/ }))?.text).toContain('✗')
-    expect(await ui.find({ type: 'Text', text: /✓/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /killed/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /cancelled/ })).toBeDefined()
+    expect((await ui.findAll({ type: 'Text', text: /^❌ 失敗$/ })).length).toBe(3)
+    expect((await ui.findAll({ type: 'Text', text: /^✅ 成功$/ })).length).toBe(1)
     await ui.unmount()
   }
   done = true
@@ -168,17 +176,20 @@ test('records dispatch, polls, renders on both surfaces, expires and stops polli
   expect(held?.[0]?.lastEvent).toBe('item.completed file_change')
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ plugin: 'ai-cli-jobs', surface, component: 'AbovePrompt', props: band })
-    expect((await ui.find({ type: 'Text', text: /修驗收工具/ }))?.text).toContain('1:02  file_change')
+    expect((await ui.find({ type: 'Text', text: /修驗收工具/ }))?.text).toBe('修驗收工具判定 bug  ·  file_change')
+    expect(await ui.find({ type: 'Text', text: /^已跑 1:02$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^🟢 gpt-6\.1-sol·high$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^這個對話$/ })).toBeDefined()
     await ui.unmount()
     const survey = await $.ui.mount({ plugin: 'ai-cli-jobs', surface, component: 'AbovePrompt', props: { ...band, hasSurvey: true } })
     expect(await survey.find({ type: 'Text', text: /修驗收工具/ })).toBeUndefined()
     await survey.unmount()
   }
-  expect(await $.ui.render({ surface: 'terminal', component: 'PromptHint', requestId: 'running-hint', props: { isDraft: false, isWorking: false, hint: 'base' } })).toEqual(tree('ai-cli ▸ 1 執行中'))
+  expect(await $.ui.render({ surface: 'terminal', component: 'PromptHint', requestId: 'running-hint', props: { isDraft: false, isWorking: false, hint: 'base' } })).toEqual(shown('ai-cli ▸ 1 執行中'))
   completed = true
   await clock.advance(POLL_MS)
   expect(held?.[0]?.status).toBe('completed')
-  expect(await $.ui.render({ surface: 'terminal', component: 'PromptHint', requestId: 'hint', props: { isDraft: false, isWorking: false, hint: 'base', tail: 'existing' } })).toEqual(tree('existing · ai-cli ▸ 1 完成'))
+  expect(await $.ui.render({ surface: 'terminal', component: 'PromptHint', requestId: 'hint', props: { isDraft: false, isWorking: false, hint: 'base', tail: 'existing' } })).toEqual(shown('existing · ai-cli ▸ 1 完成'))
   await clock.advance(119999)
   expect(held?.length).toBe(1)
   await clock.advance(1)
@@ -190,8 +201,8 @@ test('empty jobs pass both UI sites through', async ($, on) => {
   mock.clock(on)
   on('ui.render', () => tree('BASE'))
   for (const surface of ['terminal', 'desktop'] as const) {
-    expect(await $.ui.render({ surface, component: 'AbovePrompt', requestId: 'empty', props: band })).toEqual(tree('BASE'))
-    expect(await $.ui.render({ surface, component: 'PromptHint', requestId: 'empty-hint', props: { isDraft: false, isWorking: false, hint: 'base' } })).toEqual(tree('BASE'))
+    expect(await $.ui.render({ surface, component: 'AbovePrompt', requestId: 'empty', props: band })).toEqual(shown('BASE'))
+    expect(await $.ui.render({ surface, component: 'PromptHint', requestId: 'empty-hint', props: { isDraft: false, isWorking: false, hint: 'base' } })).toEqual(shown('BASE'))
   }
 })
 
@@ -217,7 +228,7 @@ test('mixed summary, failed/untracked retention, reconnect errors, and restart',
   mode = 'ok'; await clock.advance(POLL_MS)
   expect(held?.map(j => j.status)).toEqual(['running', 'failed', 'untracked'])
   mode = 'done'; await clock.advance(POLL_MS)
-  expect(await $.ui.render({ surface: 'terminal', component: 'PromptHint', requestId: 'mixed', props: { isDraft: false, isWorking: false, hint: '' } })).toEqual(tree('ai-cli ▸ 1 完成 · 1 失敗 · 1 已不追蹤'))
+  expect(await $.ui.render({ surface: 'terminal', component: 'PromptHint', requestId: 'mixed', props: { isDraft: false, isWorking: false, hint: '' } })).toEqual(shown('ai-cli ▸ 1 完成 · 1 失敗 · 1 已不追蹤'))
   await clock.advance(120000)
   expect(held).toEqual([])
   const previous = calls
@@ -282,7 +293,10 @@ test('engine refusals and missing servers turn into the fix, shown in full on th
   await clock.advance(POLL_MS)
   expect(held[0]).toEqual(expect.objectContaining({ status: 'running', lastEvent: '輪詢被拒：把 mcp__ai-cli__list_processes 加進 permissions.allow（原因：Auto mode classifier unavailable）' }))
   const ui = await $.ui.mount({ plugin: 'ai-cli-jobs', surface: 'terminal', component: 'AbovePrompt', props: band })
-  expect((await ui.find({ type: 'Text' }))?.text).toContain('把 mcp__ai-cli__list_processes 加進 permissions.allow（原因：Auto mode classifier unavailable）')
+  const fix = await ui.find({ type: 'Text', text: /permissions\.allow/ })
+  expect(fix?.text).toContain('把 mcp__ai-cli__list_processes 加進 permissions.allow（原因：Auto mode classifier unavailable）')
+  // The fix is read in full: that cell wraps instead of cutting it off.
+  expect(fix?.props.wrap).toBe('wrap')
   await ui.unmount()
 })
 
@@ -302,7 +316,8 @@ test('jobs the server adopted from an ended session show up once, with their mod
   expect(held.map(j => j.pid)).toEqual([1100, 1200])
   expect(held[1]).toEqual(expect.objectContaining({ agent: 'codex', model: 'gpt-6.1-sol', task: ADOPTED_TASK, status: 'running', elapsedSec: 300, lastEvent: 'item.completed file_change' }))
   const ui = await $.ui.mount({ plugin: 'ai-cli-jobs', surface: 'terminal', component: 'AbovePrompt', props: band })
-  expect((await ui.find({ type: 'Text', text: /接管自前一個 session/ }))?.text).toContain('5:00')
+  expect(await ui.find({ type: 'Text', text: /接管自前一個 session/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^已跑 5:00$/ })).toBeDefined()
   await ui.unmount()
   await clock.advance(POLL_MS)
   expect(held.filter(j => j.pid === 1200)).toHaveLength(1)
@@ -322,12 +337,15 @@ test('an adoption that lands after the first look shows up within seconds, not a
   on('mcp.call', () => ({ value: { isError: false, content: [], structuredContent: adopted
     ? [{ pid: 1700, jobId: 'job-1700', agent: 'codex', model: 'gpt-6.1-sol', status: 'running', elapsedSec: 400, adopted: true }]
     : [] } }))
+  // The job store scan starts with the session too; keep it off the real disk.
+  mock.env(on, { AI_CLI_STATE_DIR: '/store' })
+  on('fs.list', () => ({ value: [] }))
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   await $.session.start({ cwd: '/proj', surface: 'terminal', isInteractive: true })
-  await clock.advance(DISCOVER_EARLY_MS[0])
+  await clock.advance(DISCOVER_EARLY_MS[0]!)
   expect(held).toEqual([])
   // On Windows the server finished adopting 7–11 s after the session started; the row is up by 15 s.
-  await clock.advance(11_000 - DISCOVER_EARLY_MS[0])
+  await clock.advance(11_000 - DISCOVER_EARLY_MS[0]!)
   adopted = true
   await clock.advance(4_000)
   expect(held.map(j => j.pid)).toEqual([1700])
@@ -355,4 +373,89 @@ test('adopted rows need a jobId, and one already held is never brought back afte
   await clock.advance(POLL_MS)
   await clock.advance(120_000)
   expect(held.map(j => j.pid)).toEqual([1400])
+})
+
+test('job store folders fold into rows: outcome, project tag, task label', async () => {
+  const meta = { agent: 'codex', model: 'gpt-6.1-sol', resolvedModel: 'gpt-6.1-sol', effort: 'medium', pid: 42,
+    task: '【身分】worker\n\n# 任務：補測試', projectDir: 'D:\\Work\\proj-b', startTime: '2026-10-22T00:00:00.000Z' }
+  const running = machineJob('a', meta, undefined, undefined, 5, 'C:/Users/me/ai-cli')
+  expect(running).toEqual(expect.objectContaining({ jobId: 'a', pid: 42, agent: 'codex', model: 'gpt-6.1-sol', effort: 'medium',
+    task: '補測試', project: 'proj-b', status: 'running', startedAt: Date.parse('2026-10-22T00:00:00.000Z'), outputAt: 5 }))
+  expect(running?.endedAt).toBeUndefined()
+  // Same project, spelled with the other slashes and case, or a folder inside it: no tag.
+  expect(machineJob('a', meta, undefined, undefined, undefined, 'd:/work/proj-b/')?.project).toBe('')
+  expect(machineJob('a', meta, undefined, undefined, undefined, 'D:\\Work\\proj-b\\apps\\api')?.project).toBe('')
+  const end = '2026-10-22T00:05:00.000Z'
+  expect(machineJob('a', meta, { exitCode: 0, endTime: end }, undefined, undefined, '')?.status).toBe('ok')
+  expect(machineJob('a', meta, { exitCode: 0, killed: true, endTime: end }, undefined, undefined, '')?.status).toBe('bad')
+  expect(machineJob('a', meta, { exitCode: 0, timedOut: true, endTime: end }, undefined, undefined, '')?.status).toBe('bad')
+  expect(machineJob('a', meta, { exitCode: 1, endTime: end }, undefined, undefined, '')?.endedAt).toBe(Date.parse(end))
+  expect(machineJob('a', meta, undefined, { endTime: end }, undefined, '')?.status).toBe('lost')
+  // An end record with no endTime falls back to the file's own time.
+  expect(machineJob('a', meta, { exitCode: 0 }, undefined, undefined, '', 99)?.endedAt).toBe(99)
+  expect(machineJob('a', { model: 'or-qwen/qwen3.7-plus' }, undefined, undefined, undefined, '')?.agent).toBe('direct-api')
+  expect(machineJob('a', undefined, undefined, undefined, undefined, '')).toBeUndefined()
+  expect(ago(59_999)).toBe('剛剛')
+  expect(ago(3 * 60_000)).toBe('3 分前')
+})
+
+test('other sessions\' jobs show from the job store, this session\'s own are not shown twice', async ($, on) => {
+  const clock = mock.clock(on)
+  const now = 60 * 60_000
+  await clock.advance(now)
+  const iso = (t: number) => new Date(t).toISOString()
+  type Entry = { name: string, kind: 'file' | 'dir' | 'other', size: number, mtimeMs: number, isLink: boolean }
+  const dir = (name: string): Entry => ({ name, kind: 'dir', size: 0, mtimeMs: 0, isLink: false })
+  const file = (name: string, mtimeMs: number): Entry => ({ name, kind: 'file', size: 1, mtimeMs, isLink: false })
+  const store: Record<string, { files: Entry[], text: Record<string, unknown> }> = {
+    // Another session in another project, quiet for 7 minutes.
+    other: { files: [file('meta.json', 0), file('stdout.log', now - 7 * 60_000)],
+      text: { 'meta.json': { agent: 'grok', model: 'grok-4.7', effort: 'high', pid: 1, task: '查封包', projectDir: '/other/proj-b', startTime: iso(now - 14 * 60_000) } } },
+    // Finished a minute ago in this project.
+    done: { files: [file('meta.json', 0), file('exit.json', now - 60_000)],
+      text: { 'meta.json': { agent: 'claude', model: 'sonnet', effort: 'low', pid: 2, task: '寫摘要', projectDir: '/proj', startTime: iso(now - 5 * 60_000) },
+        'exit.json': { exitCode: 0, endTime: iso(now - 60_000), killed: false, timedOut: false } } },
+    // Finished too long ago: skipped without reading it.
+    old: { files: [file('meta.json', 0), file('exit.json', now - RECENT_MS - 1)], text: {} },
+    // This session's own job, which list_processes already reports.
+    mine: { files: [file('meta.json', 0)],
+      text: { 'meta.json': { agent: 'claude', model: 'haiku', pid: 1800, task: 'own', projectDir: '/proj', startTime: iso(now) } } },
+  }
+  const reads: string[] = []
+  mock.env(on, { AI_CLI_STATE_DIR: '/store' })
+  on('session.root', () => ({ value: '/proj' }))
+  // The engine hands the hook an absolute path (on Windows `C:\store\jobs`), so match by its last parts.
+  const parts = (path: string) => path.split(/[\\/]/)
+  on('fs.list', ($, e) => ({ value: /[\\/]store[\\/]jobs$/.test(e.path) ? Object.keys(store).map(dir) : store[parts(e.path).pop()!]?.files ?? [] }))
+  on('fs.read', ($, e) => {
+    reads.push(e.path)
+    const [job, name] = parts(e.path).slice(-2)
+    return { value: JSON.stringify(store[job!]!.text[name!]) }
+  })
+  on('tool.call', { tool: 'mcp__ai-cli__run' }, () => ({ result: { pid: 1800 } }))
+  on('mcp.call', () => ({ value: { isError: false, content: [], structuredContent: [{ pid: 1800, agent: 'claude', status: 'running', elapsedSec: 1 }] } }))
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  on('ui.render', { component: 'PromptHint' }, ($, e) => tree(e.props.tail || ''))
+  await $.session.start({ cwd: '/proj', surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: 'mcp__ai-cli__run', tool_use_id: 'own', model: 'haiku', prompt: 'own' })
+  await clock.advance(SCAN_MS)
+  expect(reads.some(p => /[\\/]old[\\/]/.test(p))).toBe(false)
+  const ui = await $.ui.mount({ plugin: 'ai-cli-jobs', surface: 'terminal', component: 'AbovePrompt', props: band })
+  const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
+  expect(texts[0]).toBe('🤖 ai-cli 背景工作（執行中 2 · 剛完成 1）')
+  // Rows: this session's running job, then the other running one, then the finished one; pid 1800 only once.
+  // The spinner frame depends on the clock; any frame is fine.
+  expect(texts.slice(6).map(t => /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] 執行$/.test(t) ? '* 執行' : t)).toEqual([
+    '* 執行', '這個對話', '🟠 haiku', 'own', '已跑 0:05',
+    '* 執行', '其他專案', '⚫ grok-4.7·high', '［proj-b］ 查封包 💤 7 分沒輸出', '已跑 14:05',
+    '✅ 成功', '同專案', '🟠 sonnet·low', '寫摘要', '1 分前',
+  ])
+  await ui.unmount()
+  expect(await $.ui.render({ surface: 'terminal', component: 'PromptHint', requestId: 'machine-hint', props: { isDraft: false, isWorking: false, hint: '' } }))
+    .toEqual(shown('ai-cli ▸ 1 執行中 · 其他 1 執行中'))
+  // meta.json is read once per job, not on every scan.
+  const metaReads = reads.filter(p => p.endsWith('meta.json')).length
+  await clock.advance(SCAN_MS)
+  expect(reads.filter(p => p.endsWith('meta.json')).length).toBe(metaReads)
+  expect(QUIET_MS).toBe(5 * 60_000)
 })
