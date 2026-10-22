@@ -117,6 +117,72 @@ export function postUpdateActions(commits: ReadonlyArray<{ sha: string }>): stri
   );
 }
 
+/**
+ * 隨 repo 散布、但每台機器要自己裝的 Claude Code 外掛。npm 套件不收 `plugins/`，
+ * `git pull` 也碰不到 Claude Code 實際執行的 `~/.claude/plugins/cache/` 副本，
+ * 所以面板改版後，這台機器沒裝或裝舊版的話，要在更新提示裡請呼叫端 AI 問使用者。
+ */
+const BUNDLED_PLUGINS: ReadonlyArray<{ name: string; dir: string; marketplace: string; repo: string; label: string }> = [
+  { name: 'ai-cli-jobs', dir: 'plugins/ai-cli-jobs', marketplace: 'tkflyc-ai-cli', repo: 'moerasermax/tkflyc-ai-cli', label: 'ai-cli-jobs 派工面板' },
+];
+
+/** 數字段逐段比；非數字段當 0，比不出來就當相同，不憑猜測叫人更新。 */
+function olderVersion(installed: string, latest: string): boolean {
+  const parts = (v: string) => v.split(/[.+-]/).slice(0, 3).map((n) => Number.parseInt(n, 10) || 0);
+  const [a, b] = [parts(installed), parts(latest)];
+  for (let i = 0; i < 3; i++) if ((a[i] ?? 0) !== (b[i] ?? 0)) return (a[i] ?? 0) < (b[i] ?? 0);
+  return false;
+}
+
+/**
+ * 一個外掛該不該問、問什麼。`installed` 為 null 表示讀不到安裝紀錄（不是「沒裝」）；
+ * `knownMarketplace` 為 false 時安裝指令要先加 marketplace。
+ */
+export function pluginAction(plugin: { name: string; marketplace: string; repo: string; label: string },
+  latest: string, installed: readonly string[] | null, knownMarketplace: boolean): string | null {
+  const id = `${plugin.name}@${plugin.marketplace}`;
+  const ask = '（給呼叫端 AI：請先問使用者要不要做，使用者同意才執行；不同意就略過，不要自己裝。）';
+  const update = `    claude plugin marketplace update ${plugin.marketplace}\n    claude plugin update ${id}\n  做完要重開 Claude Code 才生效。`;
+  const install = `${knownMarketplace ? '' : `    claude plugin marketplace add ${plugin.repo}\n`}    claude plugin install ${id}\n  做完要重開 Claude Code 才生效。`;
+  if (installed === null) {
+    return `【要問使用者】${plugin.label}有新版 ${latest}，但讀不到這台機器的外掛安裝紀錄，無法判斷有沒有裝。${ask}\n` +
+      `  已安裝的話，更新：\n${update}\n  沒裝而想裝的話：\n${install}`;
+  }
+  if (!installed.length) {
+    return `【要問使用者】${plugin.label}有新版 ${latest}，這台機器還沒裝。它會在 Claude Code 輸入框上方列出全機 ai-cli job。` +
+      `要不要安裝？${ask}\n  安裝：\n${install}`;
+  }
+  const stale = installed.filter((v) => olderVersion(v, latest));
+  if (!stale.length) return null;
+  return `【要問使用者】${plugin.label}有新版 ${latest}，這台機器裝的是 ${[...new Set(stale)].join('、')}。` +
+    `git pull 碰不到 Claude Code 執行的那份副本，要另外更新。要不要更新？${ask}\n  更新：\n${update}`;
+}
+
+/** 讀 repo 與 Claude Code 的設定目錄，給這次更新動到的外掛各一則提問；讀不到 repo 版本就不問。 */
+export function bundledPluginActions(root: string, changedFiles: readonly string[],
+  claudeDir: string = process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude')): string[] {
+  const readJson = (path: string): unknown => { try { return JSON.parse(readFileSync(path, 'utf8')); } catch { return undefined; } };
+  const actions: string[] = [];
+  for (const plugin of BUNDLED_PLUGINS) {
+    if (!changedFiles.some((name) => name.startsWith(`${plugin.dir}/`))) continue;
+    const manifest = readJson(join(root, plugin.dir, '.claude-plugin', 'plugin.json')) as { version?: unknown } | undefined;
+    if (typeof manifest?.version !== 'string' || !manifest.version) continue;
+    // 沒有 Claude Code 設定目錄就沒有人可問；目錄在但沒有安裝紀錄檔，是一個外掛都還沒裝。
+    if (!existsSync(claudeDir)) continue;
+    const recordPath = join(claudeDir, 'plugins', 'installed_plugins.json');
+    const record = existsSync(recordPath) ? readJson(recordPath) as { plugins?: unknown } | undefined : { plugins: {} };
+    const plugins = record?.plugins && typeof record.plugins === 'object' ? record.plugins as Record<string, unknown> : null;
+    const entries = plugins?.[`${plugin.name}@${plugin.marketplace}`];
+    const installed = !plugins ? null
+      : Array.isArray(entries) ? entries.map((e) => (e as { version?: unknown })?.version).filter((v): v is string => typeof v === 'string') : [];
+    const marketplaces = readJson(join(claudeDir, 'plugins', 'known_marketplaces.json'));
+    const known = !!marketplaces && typeof marketplaces === 'object' && plugin.marketplace in marketplaces;
+    const action = pluginAction(plugin, manifest.version, installed, known);
+    if (action) actions.push(action);
+  }
+  return actions;
+}
+
 export function getUpdatePolicy(): UpdatePolicy {
   const value = process.env.AI_CLI_AUTO_UPDATE;
   return value === 'off' || value === 'check' ? value : 'on';
@@ -372,7 +438,7 @@ export async function applyUpdate(options: UpdateOptions = {}): Promise<UpdateRe
       const tab = line.indexOf('\t');
       return { sha: line.slice(0, tab), subject: line.slice(tab + 1) };
     });
-    const actions = postUpdateActions(commits);
+    const actions = [...postUpdateActions(commits), ...bundledPluginActions(root, files)];
     const notice = `ai-cli 已更新至最新版（${prev.slice(0, 7)} → ${target.slice(0, 7)}，${commits.length} 個 commit），請重新啟動 MCP（Claude Code：/mcp 重連）。更新內容請至 ${await changesUrl(root, branch)} 查看\n${commits.map((c) => `${c.sha.slice(0, 7)} ${c.subject}`).join('\n')}${actions.length ? `\n\n這次更新有 ${actions.length} 件事需要你在這台機器上動手：\n\n${actions.join('\n\n')}` : ''}`;
     const state: UpdateState = { ...readState(), checkedAt: new Date().toISOString(), branch,
       local: target, remote: target, behind: 0, available: false,

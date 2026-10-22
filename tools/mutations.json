@@ -2853,5 +2853,45 @@
     "to": "  else args.push('--sandbox', 'read-only', '--ephemeral');",
     "expect": "codex strict 新開保留 session",
     "script": "verify-mcp-capabilities.mjs"
+  },
+  {
+    "name": "面板提問不看這次更新是否動到面板",
+    "file": "src/core/updater.ts",
+    "script": "verify-update.mjs",
+    "from": "    if (!changedFiles.some((name) => name.startsWith(`${plugin.dir}/`))) continue;",
+    "to": "",
+    "expect": "這次更新沒動到面板就不問"
+  },
+  {
+    "name": "面板版本只比每段第一位數字",
+    "file": "src/core/updater.ts",
+    "script": "verify-update.mjs",
+    "from": "  const parts = (v: string) => v.split(/[.+-]/).slice(0, 3).map((n) => Number.parseInt(n, 10) || 0);",
+    "to": "  const parts = (v: string) => v.split(/[.+-]/).slice(0, 3).map((n) => Number.parseInt(n.slice(0, 1), 10) || 0);",
+    "expect": "版本逐段比數字"
+  },
+  {
+    "name": "面板安裝紀錄讀不到時當成沒裝",
+    "file": "src/core/updater.ts",
+    "script": "verify-update.mjs",
+    "from": "    const installed = !plugins ? null",
+    "to": "    const installed = !plugins ? []",
+    "expect": "紀錄檔壞掉：當成讀不到"
+  },
+  {
+    "name": "面板已是新版仍然問",
+    "file": "src/core/updater.ts",
+    "script": "verify-update.mjs",
+    "from": "  if (!stale.length) return null;",
+    "to": "",
+    "expect": "已是新版不問"
+  },
+  {
+    "name": "更新提示不附面板提問",
+    "file": "src/core/updater.ts",
+    "script": "verify-update.mjs",
+    "from": "    const actions = [...postUpdateActions(commits), ...bundledPluginActions(root, files)];",
+    "to": "    const actions = postUpdateActions(commits);",
+    "expect": "applyUpdate 帶進面板改版"
   }
 ]
