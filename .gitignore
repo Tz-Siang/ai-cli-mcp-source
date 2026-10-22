@@ -17,3 +17,5 @@ e2e-out.txt
 # 不該有機會被 commit 進來。
 .tmp/
 plugins/*/.claude-plugin/types/
+# Claude Code 跟 types/ 同時產生的 tsconfig（只有一行 extends types/tsconfig.json），每台機器各自生成
+plugins/*/tsconfig.json
