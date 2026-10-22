@@ -71,7 +71,7 @@ ctx = """【ai-cli 精簡派工政策 v2.2（2026-10-22）】
 6. 額度讀 usage.raw 的 used/left 原文，不用解析出的 percent 欄位：兩家語意相反（2026-09-18 實測：codex 的 percentUsed 是剩餘、claude 的 weekAllModelsPercent 是已用），讀反會讓額度門檻判斷反向。量不到就是 unknown，不是「還夠」。direct-api 可能 exit 0 卻回空字串 message，所以 exit 0 仍須驗證 message 非空。
 7. 分類、摘要、查詢改寫、log 整理可用已確認可路由的本地／輕量 provider；機密、個資、NDA 資料不得送未核准外部免費 API。
 8. 交叉驗證只驗高風險 claim 或分歧；第二模型讀 <=2,000-token 證據包，不重掃 repository。
-9. 預算：search 8、tool 20、read 15 files、edit 5 files、test/fix 2 cycles、context 約 96k；達限即停止回報。
+9. 預算：search 8、tool 20、read 15 files、edit 5 files、test/fix 2 cycles、context 約 512K；達限即停止回報。
 10. 每個任務開頭先問使用者由誰執行：① ai-cli ② 本 session 主導者 ③ 自動；同一任務沿用，換任務再問。專案依內容或模型限制派工的規則只當建議（使用者 2026-09-25 決定）。
 11. 派 Codex 前先查 Codex 週額度剩餘（看 raw 原文，見第 6 條）：剩不到 50% 不同時跑兩個 Codex 工作；剩不到 25% 只派小包或改派 Claude；量不到就當 unknown，不並行。長工作拆小，避免一個 session 上千次請求反覆重送 100K 以上的 context（使用者 2026-10-14 決定）。
 12. OpenRouter 的 Qwen（or-qwen/qwen3.7-plus：偵察、逆向、敏感任務，便宜）與 DeepSeek（or-deepseek/deepseek-v4.1-flash-1017：看圖判定、便宜諮詢與設計審閱）列為 ai-cli 標準候選。兩者都會把資料送到外部付費 API：黃易群俠傳私服專案（D:/WorkSpace/03_研究_research/Private Game Server/黃逸群俠傳私服 與其 worktree）已放行；其他專案使用前一律先問使用者，得到同意才派（使用者 2026-10-22 決定）。"""
