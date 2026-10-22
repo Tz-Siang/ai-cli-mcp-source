@@ -8,6 +8,10 @@
 
 ## [Unreleased]
 
+### 新增
+
+- `tools/statusline/ai-cli-status.mjs`：Claude Code statusLine 腳本，直接讀 job store（`meta.json`／`exit.json`／`lost.json`）顯示**全機**執行中與近 10 分鐘完成的 job，含模型與 effort、經過時間、stdout 超過 5 分鐘沒動的「靜默」標記、其他專案的 job 附專案名；完成數依 ✓／✗／?（lost）分項計數，失敗不會被收進「+N」看不到。背景：`ai-cli-jobs` 面板只列本 session 主對話派的 job、完成後 120 秒消失，看不到子代理與其他專案的 worker。不經 MCP、不寫任何檔，每次約 55 ms；啟用方式寫在檔頭。不隨 npm 套件散布，改 job store 格式時要一起改它。（Claude）
+
 ## [6.9.1] - 2026-10-20
 
 > Codex 唯讀 job 可以續接了：`run` 同時帶 `session_id` 與 `capabilities` 時，舊版把 `--sandbox` 傳給 `codex exec resume`，
