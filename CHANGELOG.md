@@ -30,6 +30,12 @@
 
 ### 修復
 
+- **providers.json 有任何一筆不合法時，自訂前綴的 direct-api model 被靜默改派給 claude**（`src/agents/direct-api.ts` 的 `tryConfiguredProviderPrefix`）。
+  載入失敗時原本一律回 null「不走 direct-api」，於是 `nv-<model>` 落進 claude 的 catch-all——例如 openrouter 的 `max_tool_loops` 寫成 0，nv 的 job 就變成 claude 在跑。
+  實測：同一個 `nv-foo/bar`，設定檔正常時歸 direct-api、壞一筆時歸 claude。現在只要 model 點名到檔裡某個 provider（不驗證內容、只看 key），就把設定錯誤報出來；
+  其他 model（claude、codex 等）照舊放行，壞掉的 providers.json 不會讓它們一起陣亡。JSON 本身壞掉時認不出 key，維持原行為。
+  起因是評測時 DeepSeek 說「`models` 會吞掉不合法的 `max_tool_loops`」——實測那句**不成立**（`models` 的 `directApiProviders.note` 會點名 provider 與原因），追的過程才找到這條。
+  `or-`／`ds-` 內建簡寫走 `tryKnownProviderAlias`，本來就會在 `run` 報錯，不受影響。
 - 自動更新帶來的「要動手的事」（POST_UPDATE_ACTIONS 與 ai-cli-jobs 面板提問）**改由新版啟動時重算，且只有送到模型面前才算交代過**（`src/core/updater.ts`）。原本有兩個缺陷，都是 2026-10-23 拿 Qwen／DeepSeek／gpt-6.1-sol 做審查評測時，模型在標準答案之外提出、經驗證成立的：
   ① 更新子程序刻意只用 pull 前已載入的舊版 updater，所以「首次帶入面板提問」的那次更新根本不會問（gpt-6.1-sol 提出）；
   ② 模型只能從 `run`／`models` 回應的 `updateNotice` 讀到提示（背景通知走 stderr／logging，模型看不到），而新版一啟動就清提示——更新後到重開之間沒人呼叫 `run`／`models`，問句就無聲消失（DeepSeek V4.1 Flash 提出）。

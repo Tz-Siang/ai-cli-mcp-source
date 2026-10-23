@@ -33,9 +33,10 @@ function writeProviders(providers) {
 
 // 動態 import 一律提到頂層用 top-level await：ok() 只吃同步函式，
 // 在裡面 await 會讓斷言錯誤被吞掉而永遠 PASS（2026-09-08 的假綠燈教訓）。
-const { loadProvidersConfig, resolveExtraBody, directApiAgent, describeConfiguredProviders, resolveReplayReasoning } = await import(
+const { loadProvidersConfig, resolveExtraBody, directApiAgent, describeConfiguredProviders, resolveReplayReasoning, resolveDirectApiModel } = await import(
   '../dist/agents/direct-api.js'
 );
+const { resolveAgentIdForModel } = await import('../dist/models/catalog.js');
 
 let failures = 0;
 function ok(name, fn) {
@@ -607,6 +608,29 @@ for (const bad of [0, -1, 1.5, 201, '3', null, false, {}, []]) {
     });
   });
 }
+
+// 設定檔有一筆不合法時，自訂前綴的 model 不能掉進 claude 的 catch-all（回 null 就會被它接走）。
+ok('★ 設定檔壞掉時，點名其中 provider 的 model 報設定錯誤，不改派 claude', () => {
+  writeProviders({ openrouter: { api_key: 'x', max_tool_loops: 0 }, nv: BASE });
+  assert.throws(() => resolveDirectApiModel('nv-foo/bar'), /provider "openrouter" max_tool_loops/);
+  assert.throws(() => resolveDirectApiModel('nv-'), /provider "openrouter" max_tool_loops/);
+});
+ok('設定檔壞掉時，不屬於任何 provider 的 model 照舊放行給其他 agent', () => {
+  writeProviders({ openrouter: { api_key: 'x', max_tool_loops: 0 }, nv: BASE });
+  assert.strictEqual(resolveDirectApiModel('sonnet'), null);
+  assert.strictEqual(resolveAgentIdForModel('gpt-6.1-sol'), 'codex');
+  assert.strictEqual(resolveAgentIdForModel('sonnet'), 'claude');
+});
+ok('設定檔連 JSON 都壞掉：認不出是誰的 model，照舊放行不丟錯', () => {
+  writeFileSync(providersPath, '{broken', 'utf-8');
+  assert.strictEqual(resolveDirectApiModel('nv-foo/bar'), null);
+});
+ok('前綴取最長的 key：nv-beta- 不被 nv 搶走', () => {
+  // nv 寫在前面：不排序就會先命中 nv，切出 beta-foo。
+  writeProviders({ nv: BASE, 'nv-beta': BASE });
+  assert.deepStrictEqual(resolveDirectApiModel('nv-beta-foo'), { providerName: 'nv-beta', modelName: 'foo' });
+  assert.deepStrictEqual(resolveDirectApiModel('nv-foo'), { providerName: 'nv', modelName: 'foo' });
+});
 
 /** 模型持續要求讀檔；可在第一輪先回一次 503，驗證 HTTP 重試不吃輪數。 */
 async function captureLoopLimit(limit, retryFirst = false) {

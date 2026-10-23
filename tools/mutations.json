@@ -3029,5 +3029,21 @@
     "to": "        if (false) return getUpdateStatus(options);",
     "expect": "待辦沒變的重開",
     "script": "verify-update.mjs"
+  },
+  {
+    "name": "providers.json 壞掉時自訂前綴靜默改派 claude",
+    "file": "src/agents/direct-api.ts",
+    "from": "    if (matchProviderPrefix(rawModel, rawProviderKeys())) throw error;",
+    "to": "    if (false) throw error;",
+    "expect": "設定檔壞掉時，點名其中 provider 的 model 報設定錯誤",
+    "script": "verify-extra-body.mjs"
+  },
+  {
+    "name": "provider 前綴不取最長的 key",
+    "file": "src/agents/direct-api.ts",
+    "from": "  return [...keys].sort((a, b) => b.length - a.length).find(",
+    "to": "  return [...keys].find(",
+    "expect": "前綴取最長的 key",
+    "script": "verify-extra-body.mjs"
   }
 ]

@@ -694,6 +694,21 @@ function tryKnownProviderAlias(rawModel: string): DirectApiModelSelection | null
   return null;
 }
 
+/** 依 key 長度由長到短比對 `<key>-` 前綴，避免 `nv` 搶走 `nv2-...`。 */
+function matchProviderPrefix(rawModel: string, keys: string[]): string | null {
+  return [...keys].sort((a, b) => b.length - a.length).find((key) => rawModel.startsWith(`${key}-`)) ?? null;
+}
+
+/** 不驗證內容、只取 providers 底下的 key；連 JSON 都壞掉就回空陣列（認不出是誰的 model）。 */
+function rawProviderKeys(): string[] {
+  try {
+    const providers = asRecord(asRecord(JSON.parse(readFileSync(providersPath(), 'utf-8')))?.providers);
+    return providers ? Object.keys(providers) : [];
+  } catch {
+    return [];
+  }
+}
+
 function tryConfiguredProviderPrefix(rawModel: string): DirectApiModelSelection | null {
   if (!existsSync(providersPath())) {
     return null;
@@ -702,13 +717,16 @@ function tryConfiguredProviderPrefix(rawModel: string): DirectApiModelSelection 
   try {
     providerKeys = listConfiguredProviderKeys();
   } catch (error) {
+    // 設定檔壞了不能讓 claude／codex 的 run 一起陣亡，所以一般 model 照舊放行；
+    // 但點名到壞檔裡某個 provider 的 model 要把設定錯誤報出來——回 null 會被 claude 的
+    // catch-all 靜默接走（例如 openrouter 的 max_tool_loops 寫錯，nv- 的 job 就變成 claude 在跑）。
+    if (matchProviderPrefix(rawModel, rawProviderKeys())) throw error;
     debugLog(`[Debug] Skipping configured provider prefix routing: ${(error as Error).message}`);
     return null;
   }
-  const sortedKeys = providerKeys.sort((a, b) => b.length - a.length);
-  for (const providerName of sortedKeys) {
+  const providerName = matchProviderPrefix(rawModel, providerKeys);
+  if (providerName) {
     const marker = `${providerName}-`;
-    if (!rawModel.startsWith(marker)) continue;
     const modelName = rawModel.slice(marker.length);
     if (!modelName) {
       throw new Error(`Invalid direct-api model. Expected ${providerName}-<model>.`);
