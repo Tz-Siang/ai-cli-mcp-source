@@ -410,10 +410,33 @@ try {
       check('★ 提問送到模型面前之後重開：不再問', disk(f).notice === null, disk(f).notice);
       // 舊版 updater 寫的提示沒有面板提問（它不認得這段邏輯），而且已送達：新版啟動要自己補問。
       writeFileSync(join(f.state, 'update.json'), JSON.stringify({ ...disk(f),
-        lastApplied: { ...disk(f).lastApplied, from: beforePanel }, notice: '舊版 updater 的提示', noticeDelivered: '舊版 updater 的提示' }));
+        // 舊版 updater 寫的 notice 就是 lastApplied.message，也不認得 noticeFromUpdate 等新欄位。
+        lastApplied: { ...disk(f).lastApplied, from: beforePanel, message: '舊版 updater 的提示' },
+        notice: '舊版 updater 的提示', noticeDelivered: '舊版 updater 的提示', noticeFromUpdate: undefined, pendingFrom: undefined, shownActions: undefined }));
       await restart('panelOldUpdater');
       check('★ 舊版 updater 帶進面板改版卻沒問：新版啟動補問', (disk(f).notice ?? '').includes('【要問使用者】'), disk(f).notice);
-      consumeNotice();
+      // 上一批還沒送到模型面前又來一次更新：提問要帶到新提示，不能被這次的提示蓋掉。
+      commit(f, 'unrelated before delivery');
+      await checkForUpdate({ force: true });
+      await applyUpdate();
+      check('★ 上一批沒送達又來一次更新：提問帶到新提示', (disk(f).notice ?? '').includes('【要問使用者】'), disk(f).notice);
+      await restart('panelCarried');
+      check('上一批沒送達又更新後重開：仍保留提問', (disk(f).notice ?? '').includes('【要問使用者】'), disk(f).notice);
+      activate(f, 'check');
+      await checkForUpdate({ force: true });
+      check('★ check 政策不清掉更新帶來的待辦', (disk(f).notice ?? '').includes('【要問使用者】'), disk(f).notice);
+      activate(f);
+      // 重算用的 git 失敗（例如起點 commit 已不存在）：保留原狀，不能當成沒有變更而清掉。
+      const unbroken = disk(f);
+      writeFileSync(join(f.state, 'update.json'), JSON.stringify({ ...unbroken, pendingFrom: '0'.repeat(40) }));
+      await restart('panelBrokenDiff');
+      check('★ 重算的 git 失敗：保留原提示', disk(f).notice === unbroken.notice && unbroken.notice !== null, disk(f).notice);
+      // 先前已交代過的事記在累積清單裡：目前這一則沒提到它，也不能讓它復活。
+      const question = bundledPluginActions(f.a, ['plugins/ai-cli-jobs/.claude-plugin/plugin.json'])[0];
+      writeFileSync(join(f.state, 'update.json'), JSON.stringify({ ...unbroken, pendingFrom: beforePanel,
+        notice: '另一則已送達的提示', noticeDelivered: '另一則已送達的提示', noticeFromUpdate: true, shownActions: [question] }));
+      await restart('panelShown');
+      check('★ 先前已交代過的事不再復活', !!question && disk(f).notice === null, disk(f).notice);
       commit(f, 'unrelated');
       await checkForUpdate({ force: true });
       await applyUpdate();

@@ -410,8 +410,8 @@
     "name": "更新成功不寫 notice",
     "file": "src/core/updater.ts",
     "script": "verify-update.mjs",
-    "from": "      notice, noticeDelivered: null,\n    };",
-    "to": "      notice: null, noticeDelivered: null,\n    };",
+    "from": "      notice, noticeDelivered: null, noticeFromUpdate: true, pendingFrom: actionsFrom, shownActions,\n    };",
+    "to": "      notice: null, noticeDelivered: null, noticeFromUpdate: true, pendingFrom: actionsFrom, shownActions,\n    };",
     "expect": "成功 notice 持續存在並含版本重連網址標題"
   },
   {
@@ -2890,8 +2890,8 @@
     "name": "更新提示不附面板提問",
     "file": "src/core/updater.ts",
     "script": "verify-update.mjs",
-    "from": "    const actions = [...postUpdateActions(commits), ...bundledPluginActions(root, files)];",
-    "to": "    const actions = postUpdateActions(commits);",
+    "from": "      ?? [...postUpdateActions(commits), ...bundledPluginActions(root, files)]",
+    "to": "      ?? [...postUpdateActions(commits)]",
     "expect": "applyUpdate 帶進面板改版"
   },
   {
@@ -2929,7 +2929,7 @@
   {
     "name": "新版啟動不重算要動手的事",
     "file": "src/core/updater.ts",
-    "from": "        const pending = (await pendingActions(repoOf(options), last)).filter((action) => !shown.includes(action));",
+    "from": "        const pending = all.filter((action) => !shown.includes(action));",
     "to": "        const pending: string[] = [];",
     "expect": "新版啟動補問",
     "script": "verify-update.mjs"
@@ -2937,8 +2937,8 @@
   {
     "name": "沒送達的提示也當成已交代過",
     "file": "src/core/updater.ts",
-    "from": "        const shown = state.noticeDelivered === state.notice ? state.notice : '';",
-    "to": "        const shown = state.notice;",
+    "from": "        const delivered = state.noticeDelivered === state.notice;",
+    "to": "        const delivered = true;",
     "expect": "新版啟動保留提問",
     "script": "verify-update.mjs"
   },
@@ -2948,6 +2948,38 @@
     "from": "    writeState({ ...readState(), noticeDelivered: status.notice });",
     "to": "    writeState({ ...readState() });",
     "expect": "讀到提示即記為送達",
+    "script": "verify-update.mjs"
+  },
+  {
+    "name": "重算的 git 失敗當成沒有變更",
+    "file": "src/core/updater.ts",
+    "from": "  if (!diff.ok || !log.ok) return null;",
+    "to": "  if (false) return null;",
+    "expect": "重算的 git 失敗",
+    "script": "verify-update.mjs"
+  },
+  {
+    "name": "已交代清單不參與去重",
+    "file": "src/core/updater.ts",
+    "from": "        const shown = [...state.shownActions, ",
+    "to": "        const shown = [",
+    "expect": "先前已交代過的事不再復活",
+    "script": "verify-update.mjs"
+  },
+  {
+    "name": "又來一次更新不延續上一批範圍",
+    "file": "src/core/updater.ts",
+    "from": "    const actionsFrom = carried ? before.pendingFrom ?? before.lastApplied!.from : prev;",
+    "to": "    const actionsFrom = prev;",
+    "expect": "上一批沒送達又來一次更新",
+    "script": "verify-update.mjs"
+  },
+  {
+    "name": "check 政策覆蓋更新帶來的待辦",
+    "file": "src/core/updater.ts",
+    "from": "      && (state.notice === state.lastApplied.message || state.noticeFromUpdate);",
+    "to": "      && state.notice === state.lastApplied.message;",
+    "expect": "check 政策不清掉更新帶來的待辦",
     "script": "verify-update.mjs"
   }
 ]
