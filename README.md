@@ -158,6 +158,17 @@ Note the terminology clash: the `run` tool's `reasoning_effort` argument is a
 CLI flag for claude/codex and still does not apply here. What `extra_body` sends is
 the same-named *API field*, which is a different thing.
 
+#### max_tool_loops — tool loop budget
+
+Each provider may set `"max_tool_loops": 60` in providers.json. It must be an
+integer from 1 to 200 (default: 30). This limits both tool-loop iterations and
+API completion calls; HTTP retries do not count toward the limit. Reaching the
+limit returns `finish_reason: "tool_loop_limit"` and logs the effective limit
+to stderr. Invalid values report the provider name and providers.json path.
+The job still ends as `completed` with exit code 0 and `get_result` does not
+show that stderr line, so check `agentOutput.finish_reason` before treating the
+reply as a finished answer.
+
 #### retry — surviving a shared endpoint
 
 Free shared endpoints throttle and shed load. NVIDIA's own troubleshooting docs say

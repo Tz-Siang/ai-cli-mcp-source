@@ -60,8 +60,8 @@ const DIRECT_API_MODELS = [
 const SAFE_SESSION_ID = /^[A-Za-z0-9._-]+$/;
 const IMAGE_MARKER = /\[image:([^\]\r\n]+)\]/g;
 const NO_TOOLS_MARKER = /^\s*\[no-tools\]\s*/i;
-const MAX_TOOL_LOOP_ITERATIONS = 30;
-const MAX_API_CALLS = 30;
+const DEFAULT_MAX_TOOL_LOOPS = 30;
+const MAX_ALLOWED_TOOL_LOOPS = 200;
 const MAX_TOOL_OUTPUT_CHARS = 10000;
 const TOOL_OUTPUT_PREVIEW_CHARS = 200;
 const BASH_TIMEOUT_MS = 30000;
@@ -219,6 +219,8 @@ const MAX_INITIAL_DELAY_MS = 30_000;
 interface ProviderConfig {
   base_url: string;
   api_key: string;
+  /** 工具迴圈與 API 呼叫的共同上限；不計 HTTP 重試。 */
+  max_tool_loops?: number;
   /** 429/5xx 的重試設定；省略時用 DEFAULT_RETRY。 */
   retry?: RetryConfig;
   /**
@@ -419,6 +421,18 @@ function normalizeRetryConfig(
   };
 }
 
+/** 與 retry 一樣，非法設定要點名 provider 與設定檔，不靜默降級。 */
+function normalizeMaxToolLoops(providerName: string, value: unknown, targetPath: string): number {
+  if (value === undefined) return DEFAULT_MAX_TOOL_LOOPS;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0 || value > MAX_ALLOWED_TOOL_LOOPS) {
+    throw new Error(
+      `Invalid providers.json at ${targetPath}: provider "${providerName}" max_tool_loops ` +
+        `must be an integer between 1 and ${MAX_ALLOWED_TOOL_LOOPS}.`
+    );
+  }
+  return value;
+}
+
 /**
  * 解析 `replay_reasoning`。接受 `true`（整個 provider）或 model 名稱陣列。
  */
@@ -478,6 +492,7 @@ function normalizeProviderConfig(
 
   const extraBody = normalizeExtraBody(providerName, 'extra_body', record.extra_body, targetPath);
   const retry = normalizeRetryConfig(providerName, record.retry, targetPath);
+  const maxToolLoops = normalizeMaxToolLoops(providerName, record.max_tool_loops, targetPath);
   const replayReasoning = normalizeReplayReasoning(providerName, record.replay_reasoning, targetPath);
 
   let modelExtraBody: Record<string, Record<string, unknown>> | undefined;
@@ -503,6 +518,7 @@ function normalizeProviderConfig(
   const config: ProviderConfig = {
     base_url: baseUrl.trim().replace(/\/+$/, ''),
     api_key: apiKey.trim(),
+    max_tool_loops: maxToolLoops,
   };
   if (retry) config.retry = retry;
   if (replayReasoning !== undefined) config.replay_reasoning = replayReasoning;
@@ -741,6 +757,7 @@ function buildCommand(input: BuildCommandInput): BuiltCommand {
       modelName: input.providerModel,
       baseUrl: provider.base_url,
       apiKey: provider.api_key,
+      maxToolLoops: provider.max_tool_loops ?? DEFAULT_MAX_TOOL_LOOPS,
       ...(extraBody ? { extraBody } : {}),
       ...(provider.retry ? { retry: provider.retry } : {}),
       ...(resolveReplayReasoning(provider, input.providerModel) ? { replayReasoning: true } : {}),
@@ -1662,7 +1679,8 @@ async function runDirect(cmd: BuiltCommand, io: DirectRunIO): Promise<void> {
   const url = `${config.baseUrl.replace(/\/+$/, '')}/chat/completions`;
   let reachedLimit = true;
   let apiCalls = 0;
-  for (let iteration = 0; iteration < MAX_TOOL_LOOP_ITERATIONS && apiCalls < MAX_API_CALLS; iteration++) {
+  const maxToolLoops = config.maxToolLoops ?? DEFAULT_MAX_TOOL_LOOPS;
+  for (let iteration = 0; iteration < maxToolLoops && apiCalls < maxToolLoops; iteration++) {
     apiCalls += 1;
     const turn = await requestCompletion({
       url,
@@ -1714,7 +1732,7 @@ async function runDirect(cmd: BuiltCommand, io: DirectRunIO): Promise<void> {
 
   if (reachedLimit) {
     state.finishReason = 'tool_loop_limit';
-    io.stderr(`[direct-api] Reached maximum tool/API calls (${MAX_TOOL_LOOP_ITERATIONS}).\n`);
+    io.stderr(`[direct-api] Reached maximum tool/API calls (${maxToolLoops}).\n`);
   }
 
   const tokens = normalizeTokens(state.usage);

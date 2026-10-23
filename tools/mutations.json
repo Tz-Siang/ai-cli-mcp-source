@@ -2917,5 +2917,13 @@
     "from": "  const update = `${add}    claude plugin marketplace update ${plugin.marketplace}",
     "to": "  const update = `    claude plugin marketplace update ${plugin.marketplace}",
     "expect": "有舊版但 marketplace 紀錄不見"
+  },
+  {
+    "name": "max_tool_loops 忽略 provider 自訂值永遠用 30",
+    "file": "src/agents/direct-api.ts",
+    "from": "      maxToolLoops: provider.max_tool_loops ?? DEFAULT_MAX_TOOL_LOOPS,",
+    "to": "      maxToolLoops: DEFAULT_MAX_TOOL_LOOPS,",
+    "expect": "max_tool_loops 自訂值生效",
+    "script": "verify-extra-body.mjs"
   }
 ]

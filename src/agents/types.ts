@@ -68,6 +68,8 @@ export interface DirectApiCommandConfig {
   modelName: string;
   baseUrl: string;
   apiKey: string;
+  /** providers.json 的 max_tool_loops；迴圈與 API 呼叫共用，不計 HTTP 重試。 */
+  maxToolLoops?: number;
   /**
    * 併進 /chat/completions request body 的額外欄位（providers.json 的
    * extra_body ∪ model_extra_body）。框架自組的欄位不會出現在這裡——

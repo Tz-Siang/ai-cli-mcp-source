@@ -593,5 +593,75 @@ ok('端點沒回 reasoning 時省略欄位，不要送空字串', () => {
   assert.ok(!('reasoning_content' in asst), '不可序列化成空字串或 undefined');
 });
 
+// ---------------------------------------------------------------- 工具迴圈上限
+console.log('\n[max_tool_loops]');
+
+for (const bad of [0, -1, 1.5, 201, '3', null, false, {}, []]) {
+  ok(`max_tool_loops 非法值 ${JSON.stringify(bad)} → 點名 provider 與路徑`, () => {
+    writeProviders({ nv: { ...BASE, max_tool_loops: bad } });
+    assert.throws(() => loadProvidersConfig(), (err) => {
+      assert.ok(err.message.includes(providersPath));
+      assert.ok(err.message.includes('provider "nv"'));
+      assert.ok(err.message.includes('max_tool_loops must be an integer between 1 and 200'));
+      return true;
+    });
+  });
+}
+
+/** 模型持續要求讀檔；可在第一輪先回一次 503，驗證 HTTP 重試不吃輪數。 */
+async function captureLoopLimit(limit, retryFirst = false) {
+  writeProviders({ nv: {
+    ...BASE,
+    ...(limit === undefined ? {} : { max_tool_loops: limit }),
+    retry: { max_retries: 1, initial_delay_ms: 0 },
+  } });
+  let requests = 0;
+  const events = [];
+  let stderr = '';
+  globalThis.fetch = async () => {
+    requests++;
+    // 有迴圈回歸時也要讓測試有界，避免無限執行。
+    if (requests > 202) throw new Error('tool loop did not stop');
+    if (retryFirst && requests === 1) return new Response('retry', { status: 503 });
+    const event = { choices: [{
+      delta: { tool_calls: [{ index: 0, id: `loop_${requests}`, type: 'function',
+        function: { name: 'read_file', arguments: '{"path":"a.ts"}' } }] },
+      finish_reason: 'tool_calls',
+    }] };
+    return new Response(`data: ${JSON.stringify(event)}\n\ndata: [DONE]\n\n`, {
+      headers: { 'content-type': 'text/event-stream' },
+    });
+  };
+  const cmd = directApiAgent.buildCommand({
+    cliPath: '', cwd: tempRoot, prompt: 'keep reading', resolvedModel: 'test/model',
+    rawModel: 'nv-test/model', reasoningEffort: '', providerName: 'nv', providerModel: 'test/model',
+  });
+  await directApiAgent.runDirect(cmd, {
+    stdout: (chunk) => events.push(...chunk.trim().split('\n').filter(Boolean).map(JSON.parse)),
+    stderr: (chunk) => { stderr += chunk; },
+  });
+  return { requests, events, stderr };
+}
+
+for (const [label, limit, expected, retryFirst] of [
+  ['max_tool_loops 預設 30', undefined, 30, false],
+  ['max_tool_loops 自訂值生效', 3, 3, false],
+  ['max_tool_loops 可超過原本 30 圈', 31, 31, false],
+  ['max_tool_loops 下界 1', 1, 1, false],
+  ['max_tool_loops 硬上限 200 可用', 200, 200, false],
+  ['max_tool_loops 不計 HTTP 重試', 3, 3, true],
+]) {
+  // async 工作在頂層 await；斷言仍交給同步 ok()，讓突變工具讀得到 FAIL 名稱。
+  const captured = await captureLoopLimit(limit, retryFirst);
+  ok(label, () => {
+    assert.strictEqual(captured.requests, expected + Number(retryFirst), 'API 請求數');
+    assert.strictEqual(captured.events.filter((e) => e.type === 'tool_use').length, expected, '工具輪數');
+    const result = captured.events.find((e) => e.type === 'result');
+    assert.strictEqual(result?.finish_reason, 'tool_loop_limit');
+    assert.ok(captured.stderr.includes(`maximum tool/API calls (${expected})`), captured.stderr);
+    assert.strictEqual(captured.events.filter((e) => e.type === 'retry').length, Number(retryFirst));
+  });
+}
+
 console.log(failures === 0 ? '\n全部通過 ✅' : `\n有 ${failures} 項失敗 ❌`);
 process.exit(failures === 0 ? 0 : 1);

@@ -175,6 +175,15 @@ key 是送給 provider 的完整 model 名（前綴之後那串）。
 > **注意術語衝突**：`run` 工具的 `reasoning_effort` 參數是 claude/codex 的 CLI 旗標，
 > 對 direct-api 仍然無效。`extra_body` 送的是**同名的 API 欄位**，兩者不是同一件事。
 
+#### max_tool_loops：工具迴圈上限
+
+每個 provider 可在 providers.json 設定 `"max_tool_loops": 60`，接受 1～200 的
+整數，預設 30。同一值限制工具迴圈輪數與 API completion 呼叫數，HTTP 重試不計入。
+撞限時回傳 `finish_reason: "tool_loop_limit"`，stderr 印出實際生效的上限；
+非法值會報錯，並指出 provider 名稱與 providers.json 路徑。
+撞限時 job 仍是 `completed`、exit code 0，`get_result` 也看不到那行 stderr，
+所以要先檢查 `agentOutput.finish_reason`，不要把回覆直接當成完成的答案。
+
 #### retry：讓共享端點跑得完
 
 免費的共享端點在尖峰會限流與卸載。NVIDIA 自己的故障排除文件就寫明 hosted Nemotron
