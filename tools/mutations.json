@@ -410,8 +410,8 @@
     "name": "更新成功不寫 notice",
     "file": "src/core/updater.ts",
     "script": "verify-update.mjs",
-    "from": "      notice,\n    };",
-    "to": "      notice: null,\n    };",
+    "from": "      notice, noticeDelivered: null,\n    };",
+    "to": "      notice: null, noticeDelivered: null,\n    };",
     "expect": "成功 notice 持續存在並含版本重連網址標題"
   },
   {
