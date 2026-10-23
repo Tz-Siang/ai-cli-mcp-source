@@ -579,6 +579,15 @@ function ensureProvidersConfigMigrated(): void {
   console.error(`[direct-api] Migrated OpenCode auth to ${targetPath}.`);
 }
 
+/**
+ * 讀出 providers.json 文字並剝掉 BOM（與 user-config 的 readConfigText 同理）：記事本與 PowerShell 5.1
+ * 會寫出帶 BOM 的檔，JSON.parse 直接丟錯，整個 direct-api 就不能用（稽核：gpt-6.1-sol）。
+ */
+function readProvidersText(targetPath: string): string {
+  const text = readFileSync(targetPath, 'utf-8');
+  return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+}
+
 export function loadProvidersConfig(): ProvidersFile {
   ensureProvidersConfigMigrated();
   const targetPath = providersPath();
@@ -587,7 +596,7 @@ export function loadProvidersConfig(): ProvidersFile {
   }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(readFileSync(targetPath, 'utf-8'));
+    parsed = JSON.parse(readProvidersText(targetPath));
   } catch (error) {
     throw new Error(`Failed to read providers.json at ${targetPath}: ${(error as Error).message}`);
   }
@@ -702,7 +711,7 @@ function matchProviderPrefix(rawModel: string, keys: string[]): string | null {
 /** 不驗證內容、只取 providers 底下的 key；連 JSON 都壞掉就回空陣列（認不出是誰的 model）。 */
 function rawProviderKeys(): string[] {
   try {
-    const providers = asRecord(asRecord(JSON.parse(readFileSync(providersPath(), 'utf-8')))?.providers);
+    const providers = asRecord(asRecord(JSON.parse(readProvidersText(providersPath())))?.providers);
     return providers ? Object.keys(providers) : [];
   } catch {
     return [];

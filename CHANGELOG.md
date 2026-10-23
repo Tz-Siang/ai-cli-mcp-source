@@ -36,6 +36,9 @@
   其他 model（claude、codex 等）照舊放行，壞掉的 providers.json 不會讓它們一起陣亡。JSON 本身壞掉時認不出 key，維持原行為。
   起因是評測時 DeepSeek 說「`models` 會吞掉不合法的 `max_tool_loops`」——實測那句**不成立**（`models` 的 `directApiProviders.note` 會點名 provider 與原因），追的過程才找到這條。
   `or-`／`ds-` 內建簡寫走 `tryKnownProviderAlias`，本來就會在 `run` 報錯，不受影響。
+  - 同時修：providers.json **帶 UTF-8 BOM 時整個 direct-api 不能用**（`JSON.parse` 看到 U+FEFF 直接丟錯；記事本與 PowerShell 5.1 會寫出這種檔）。讀檔改為先剝 BOM，與 `user-config.ts` 的 `readConfigText` 同理。
+  - 獨立稽核（ai-cli `gpt-6.1-sol` medium，唯讀）提 2 條：BOM 那條已修；另一條是 provider 取名與內建 model 前綴撞名（例如叫 `gpt`）時，壞設定下 `gpt-6.1-sol` 會被擋。
+    **不修**：設定正常時撞名的前綴本來就先歸 direct-api，壞掉時報錯與正常時的歸屬一致，原本「靜默改走 codex」才是不一致的那邊。provider 請取不會撞名的短名（例如 `nv`）。
 - 自動更新帶來的「要動手的事」（POST_UPDATE_ACTIONS 與 ai-cli-jobs 面板提問）**改由新版啟動時重算，且只有送到模型面前才算交代過**（`src/core/updater.ts`）。原本有兩個缺陷，都是 2026-10-23 拿 Qwen／DeepSeek／gpt-6.1-sol 做審查評測時，模型在標準答案之外提出、經驗證成立的：
   ① 更新子程序刻意只用 pull 前已載入的舊版 updater，所以「首次帶入面板提問」的那次更新根本不會問（gpt-6.1-sol 提出）；
   ② 模型只能從 `run`／`models` 回應的 `updateNotice` 讀到提示（背景通知走 stderr／logging，模型看不到），而新版一啟動就清提示——更新後到重開之間沒人呼叫 `run`／`models`，問句就無聲消失（DeepSeek V4.1 Flash 提出）。

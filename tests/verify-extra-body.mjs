@@ -625,6 +625,15 @@ ok('設定檔連 JSON 都壞掉：認不出是誰的 model，照舊放行不丟�
   writeFileSync(providersPath, '{broken', 'utf-8');
   assert.strictEqual(resolveDirectApiModel('nv-foo/bar'), null);
 });
+ok('★ 帶 UTF-8 BOM 的 providers.json 照常載入與路由', () => {
+  writeFileSync(providersPath, `﻿${JSON.stringify({ providers: { nv: BASE } })}`, 'utf-8');
+  assert.deepStrictEqual(Object.keys(loadProvidersConfig().providers), ['nv']);
+  assert.strictEqual(resolveAgentIdForModel('nv-foo/bar'), 'direct-api');
+});
+ok('帶 BOM 又有一筆不合法：仍認得 key、報設定錯誤', () => {
+  writeFileSync(providersPath, `﻿${JSON.stringify({ providers: { openrouter: { api_key: 'x', max_tool_loops: 0 }, nv: BASE } })}`, 'utf-8');
+  assert.throws(() => resolveDirectApiModel('nv-foo/bar'), /provider "openrouter" max_tool_loops/);
+});
 ok('前綴取最長的 key：nv-beta- 不被 nv 搶走', () => {
   // nv 寫在前面：不排序就會先命中 nv，切出 beta-foo。
   writeProviders({ nv: BASE, 'nv-beta': BASE });
