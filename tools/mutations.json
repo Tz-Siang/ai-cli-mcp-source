@@ -2925,5 +2925,29 @@
     "to": "      maxToolLoops: DEFAULT_MAX_TOOL_LOOPS,",
     "expect": "max_tool_loops 自訂值生效",
     "script": "verify-extra-body.mjs"
+  },
+  {
+    "name": "新版啟動不重算要動手的事",
+    "file": "src/core/updater.ts",
+    "from": "        const pending = (await pendingActions(repoOf(options), last)).filter((action) => !shown.includes(action));",
+    "to": "        const pending: string[] = [];",
+    "expect": "新版啟動補問",
+    "script": "verify-update.mjs"
+  },
+  {
+    "name": "沒送達的提示也當成已交代過",
+    "file": "src/core/updater.ts",
+    "from": "        const shown = state.noticeDelivered === state.notice ? state.notice : '';",
+    "to": "        const shown = state.notice;",
+    "expect": "新版啟動保留提問",
+    "script": "verify-update.mjs"
+  },
+  {
+    "name": "run／models 讀提示不記送達",
+    "file": "src/core/updater.ts",
+    "from": "    writeState({ ...readState(), noticeDelivered: status.notice });",
+    "to": "    writeState({ ...readState() });",
+    "expect": "讀到提示即記為送達",
+    "script": "verify-update.mjs"
   }
 ]

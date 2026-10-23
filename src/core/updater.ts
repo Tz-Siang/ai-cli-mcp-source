@@ -22,6 +22,8 @@ export interface UpdateState {
   available: boolean;
   lastApplied: { at: string; from: string; to: string; ok: boolean; commits: UpdateCommit[]; message: string } | null;
   notice: string | null;
+  /** 已經在 run／models 回應裡送到呼叫端 AI 面前的那一則 notice；與 notice 相同才算送達。 */
+  noticeDelivered: string | null;
 }
 export interface CommandResult {
   command: string;
@@ -46,7 +48,7 @@ const MINUTE = 60_000;
 const GIT_TIMEOUT = 20_000;
 const emptyState = (): UpdateState => ({
   checkedAt: null, branch: null, local: null, remote: null, behind: 0,
-  available: false, lastApplied: null, notice: null,
+  available: false, lastApplied: null, notice: null, noticeDelivered: null,
 });
 const messageOf = (error: unknown): string => error instanceof Error ? error.message : String(error);
 const repoOf = (options: UpdateOptions): string => resolve(options.repoRoot || process.env.AI_CLI_UPDATE_REPO_ROOT || DEFAULT_ROOT);
@@ -218,7 +220,7 @@ function readState(): UpdateState {
     const value = JSON.parse(readFileSync(statePath(), 'utf8'));
     if (!value || typeof value !== 'object' || Array.isArray(value)) return emptyState();
     const state = emptyState();
-    for (const key of ['checkedAt', 'branch', 'local', 'remote', 'notice'] as const) {
+    for (const key of ['checkedAt', 'branch', 'local', 'remote', 'notice', 'noticeDelivered'] as const) {
       if (typeof value[key] === 'string') state[key] = value[key];
     }
     if (Number.isSafeInteger(value.behind) && value.behind >= 0) state.behind = value.behind;
@@ -255,9 +257,29 @@ export function getUpdateStatus(options: UpdateOptions = {}): UpdateResult {
   }
 }
 
-/** 讀取不消費；只有新版啟動時才清除。 */
+/**
+ * 給 run／models 的回應用：讀取不清除（只有新版啟動時才清除），但記下這則已送到呼叫端 AI 面前。
+ * 背景通知（stderr／logging）模型看不到，不能用這個，否則沒人看過的提示會被當成送達。
+ */
 export function consumeNotice(options: UpdateOptions = {}): string | null {
-  return getUpdateStatus(options).notice;
+  const status = getUpdateStatus(options);
+  if (status.supported && status.notice !== null && status.noticeDelivered !== status.notice) {
+    // 寫不進去只代表下次啟動會多問一次，不影響這次回應。
+    writeState({ ...readState(), noticeDelivered: status.notice });
+  }
+  return status.notice;
+}
+
+/**
+ * 上次更新帶進來、要人動手的事，由**現在這版**的程式重算。
+ *
+ * 寫更新提示的是更新前就載入的舊版 updater（更新子程序刻意不載入會被替換的程式），所以新加的
+ * 判斷在「帶進它的那次更新」不會生效——首次帶入面板提問的那次更新就沒問（稽核：Codex gpt-6.1-sol）。
+ */
+async function pendingActions(root: string, last: NonNullable<UpdateState['lastApplied']>): Promise<string[]> {
+  const diff = await spawnUpdateCommand(root, 'git', ['diff', '--name-only', `${last.from}..${last.to}`], GIT_TIMEOUT);
+  const files = diff.ok ? diff.stdout.split(/\r?\n/) : [];
+  return [...postUpdateActions(last.commits), ...bundledPluginActions(root, files)];
 }
 
 /** shell 只用於 Windows npm.cmd；參數均為程式內固定值，git 參數不經 shell。 */
@@ -456,7 +478,7 @@ export async function applyUpdate(options: UpdateOptions = {}): Promise<UpdateRe
     const state: UpdateState = { ...readState(), checkedAt: new Date().toISOString(), branch,
       local: target, remote: target, behind: 0, available: false,
       lastApplied: { at: new Date().toISOString(), from: prev, to: target, ok: true, commits, message: notice },
-      notice,
+      notice, noticeDelivered: null,
     };
     const writeError = writeState(state);
     if (writeError) throw new Error(writeError);
@@ -491,7 +513,15 @@ export function clearNoticeOnStartup(options: UpdateOptions = {}): Promise<Updat
       // 只有「這次真的清掉提示」才回報已是最新版；之後每次啟動都安靜，
       // 否則框架自動呼叫的 CLI（exec 等）每次都會在 stderr 多一行（獨立稽核 @gemini-3.1-pro 註記）。
       if (state.lastApplied?.ok && state.lastApplied.to === head.stdout.trim() && state.notice !== null) {
-        const writeError = writeState({ ...state, notice: null });
+        // 要動手的事由新版重算；已經在 run／models 回應裡送到模型面前的才算交代過。
+        // 沒送到就重開的話，原本會連同提問一起清掉（稽核：DeepSeek V4.1 Flash）。
+        const last = state.lastApplied;
+        const shown = state.noticeDelivered === state.notice ? state.notice : '';
+        const pending = (await pendingActions(repoOf(options), last)).filter((action) => !shown.includes(action));
+        const notice = pending.length
+          ? `ai-cli 上次更新（${last.from.slice(0, 7)} → ${last.to.slice(0, 7)}）有 ${pending.length} 件事需要你在這台機器上動手：\n\n${pending.join('\n\n')}`
+          : null;
+        const writeError = writeState({ ...state, notice, noticeDelivered: null });
         return { ...getUpdateStatus(options), reason: writeError ?? `ai-cli 已是最新版 ${head.stdout.trim().slice(0, 7)}` };
       }
     }
@@ -542,7 +572,8 @@ export function scheduleBackgroundUpdates(notify: (message: string) => Promise<v
           await report(`ai-cli 自動更新未套用：${reason || '更新子程序失敗'}`);
         }
       }
-      const notice = consumeNotice(options);
+      // 背景通知模型看不到，只讀不標記送達（見 consumeNotice）。
+      const notice = getUpdateStatus(options).notice;
       if (notice && notice !== lastNotice) { lastNotice = notice; await report(notice); }
     } catch (error) { await report(`ai-cli 更新檢查失敗：${messageOf(error)}`); }
     finally { busy = false; }

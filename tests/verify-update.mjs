@@ -391,16 +391,35 @@ try {
       writeFileSync(join(process.env.CLAUDE_CONFIG_DIR, 'plugins', 'installed_plugins.json'),
         JSON.stringify({ version: 2, plugins: { 'ai-cli-jobs@tkflyc-ai-cli': [{ scope: 'user', version: '0.1.4' }] } }));
       mkdirSync(join(f.b, 'plugins/ai-cli-jobs/.claude-plugin'), { recursive: true });
+      const beforePanel = head(f);
       commit(f, 'panel 0.1.5', JSON.stringify({ name: 'ai-cli-jobs', version: '0.1.5' }), 'plugins/ai-cli-jobs/.claude-plugin/plugin.json');
       await checkForUpdate({ force: true });
       const applied = await applyUpdate();
       const notice = disk(f).notice ?? '';
       check('★ applyUpdate 帶進面板改版：提示裡問要不要更新', applied.applied === true && notice.includes('件事需要你在這台機器上動手')
         && notice.includes('【要問使用者】') && notice.includes('0.1.4') && notice.includes('claude plugin update ai-cli-jobs@tkflyc-ai-cli'), JSON.stringify(applied) + notice);
+      // 新的模組實例＝新版 server 啟動。提示沒經過 run／models 送到模型面前就重開，提問不能跟著消失。
+      const restart = async (tag) => (await import(`../dist/core/updater.js?${tag}=${serial}`)).clearNoticeOnStartup();
+      await restart('panelUndelivered');
+      const kept = disk(f).notice ?? '';
+      check('★ 提問沒送到模型面前就重開：新版啟動保留提問', kept.includes('【要問使用者】') && kept.includes('0.1.4')
+        && kept.includes('件事需要你在這台機器上動手') && !kept.includes('請重新啟動 MCP'), kept);
+      check('新版啟動重寫提示後送達標記歸零', getUpdateStatus().noticeDelivered === null);
+      check('run／models 讀到提示即記為送達', consumeNotice() === kept && disk(f).noticeDelivered === kept);
+      await restart('panelDelivered');
+      check('★ 提問送到模型面前之後重開：不再問', disk(f).notice === null, disk(f).notice);
+      // 舊版 updater 寫的提示沒有面板提問（它不認得這段邏輯），而且已送達：新版啟動要自己補問。
+      writeFileSync(join(f.state, 'update.json'), JSON.stringify({ ...disk(f),
+        lastApplied: { ...disk(f).lastApplied, from: beforePanel }, notice: '舊版 updater 的提示', noticeDelivered: '舊版 updater 的提示' }));
+      await restart('panelOldUpdater');
+      check('★ 舊版 updater 帶進面板改版卻沒問：新版啟動補問', (disk(f).notice ?? '').includes('【要問使用者】'), disk(f).notice);
+      consumeNotice();
       commit(f, 'unrelated');
       await checkForUpdate({ force: true });
       await applyUpdate();
       check('下一次更新沒動到面板：不再問', !(disk(f).notice ?? '').includes('【要問使用者】'), disk(f).notice);
+      await restart('panelUnrelated');
+      check('下一次更新沒動到面板：重開後也不補問', disk(f).notice === null, disk(f).notice);
     } finally {
       if (saved === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = saved;
     }
