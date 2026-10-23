@@ -440,9 +440,21 @@ try {
       activate(f);
       // 重算用的 git 失敗（例如起點 commit 已不存在）：保留原狀，不能當成沒有變更而清掉。
       const unbroken = disk(f);
-      writeFileSync(join(f.state, 'update.json'), JSON.stringify({ ...unbroken, pendingFrom: '0'.repeat(40) }));
+      writeFileSync(join(f.state, 'update.json'), JSON.stringify({ ...unbroken, noticeDelivered: null, pendingFrom: '0'.repeat(40) }));
       await restart('panelBrokenDiff');
       check('★ 重算的 git 失敗：保留原提示', disk(f).notice === unbroken.notice && unbroken.notice !== null, disk(f).notice);
+      // 已送達的提示遇到同樣的 git 失敗要清掉，否則起點不在時每次啟動都卡著、每個回應都重送。
+      writeFileSync(join(f.state, 'update.json'), JSON.stringify({ ...unbroken, noticeDelivered: unbroken.notice, pendingFrom: '0'.repeat(40) }));
+      await restart('panelBrokenDelivered');
+      check('★ 已送達的提示遇 git 失敗且起點已不存在：重開清掉', disk(f).notice === null, disk(f).notice);
+      // 起點 commit 還在、diff 卻失敗（暫時失敗）：已送達也要保留，原文可能漏了新版才認得的提問。
+      // 用指向不存在 tree 的 commit 物件重現「commit 在、diff 算不出來」。
+      const fakeCommitFile = join(TEMP, 'fake-commit.txt');
+      writeFileSync(fakeCommitFile, `tree ${'1'.repeat(40)}\nauthor t <t@t> 0 +0000\ncommitter t <t@t> 0 +0000\n\nfake\n`);
+      const brokenTree = git(f.a, 'hash-object', '-t', 'commit', '--literally', '-w', fakeCommitFile);
+      writeFileSync(join(f.state, 'update.json'), JSON.stringify({ ...unbroken, noticeDelivered: unbroken.notice, pendingFrom: brokenTree }));
+      await restart('panelBrokenTransient');
+      check('★ 已送達的提示遇 git 暫時失敗（起點還在）：保留', disk(f).notice === unbroken.notice, disk(f).notice);
       // 先前已交代過的事記在累積清單裡：目前這一則沒提到它，也不能讓它復活。
       const question = bundledPluginActions(f.a, ['plugins/ai-cli-jobs/.claude-plugin/plugin.json'])[0];
       writeFileSync(join(f.state, 'update.json'), JSON.stringify({ ...unbroken, pendingFrom: beforePanel,

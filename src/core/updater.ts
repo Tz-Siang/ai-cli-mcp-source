@@ -560,8 +560,16 @@ export function clearNoticeOnStartup(options: UpdateOptions = {}): Promise<Updat
         // 沒送到就重開的話，原本會連同提問一起清掉（稽核：DeepSeek V4.1 Flash）。
         const delivered = state.noticeDelivered === state.notice;
         // check 政策的「有新版」不是待辦（range 為 null），照舊清掉；待辦則重算，算不出來就整份保留原狀。
-        const all = range ? await pendingActions(repoOf(options), range.from, range.to, []) : [];
-        if (all === null) return getUpdateStatus(options);
+        const recomputed = range ? await pendingActions(repoOf(options), range.from, range.to, []) : [];
+        // 算不出來時保留原狀，除非已送達而且起點 commit 已不存在：那是永久失敗，不清就每次啟動都卡著、每個回應都重送。
+        // 起點還在就當暫時失敗（例如逾時）：已送達的原文可能是舊版 updater 寫的、漏了新版才認得的提問，不能清（稽核第 4 輪）。
+        if (recomputed === null) {
+          const probe = delivered ? await spawnUpdateCommand(repoOf(options), 'git', ['cat-file', '-e', `${range!.from}^{commit}`], GIT_TIMEOUT) : null;
+          // cat-file 自己逾時或起不來不算「不存在」：只認 git 跑完並明確回報找不到（exit 128）（稽核第 4 輪複核）。
+          const fromGone = probe !== null && !probe.timedOut && probe.code !== null && probe.code !== 0;
+          if (!fromGone) return getUpdateStatus(options);
+        }
+        const all = recomputed ?? [];
         const shown = [...state.shownActions, ...(delivered ? all.filter((action) => state.notice!.includes(action)) : [])];
         const pending = all.filter((action) => !shown.includes(action));
         // 等 git 的期間別的程序可能更新過或記了送達：狀態變了就不寫，交給下次啟動，不拿舊快照蓋掉新資料。

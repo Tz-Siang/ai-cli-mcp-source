@@ -2959,6 +2959,22 @@
     "script": "verify-update.mjs"
   },
   {
+    "name": "已送達的提示遇 git 失敗也永遠保留",
+    "file": "src/core/updater.ts",
+    "from": "          const fromGone = probe !== null && !probe.timedOut && probe.code !== null && probe.code !== 0;",
+    "to": "          const fromGone = false;",
+    "expect": "已送達的提示遇 git 失敗且起點已不存在",
+    "script": "verify-update.mjs"
+  },
+  {
+    "name": "已送達就清掉，不分 git 暫時或永久失敗",
+    "file": "src/core/updater.ts",
+    "from": "!probe.timedOut && probe.code !== null && probe.code !== 0;",
+    "to": "!probe.timedOut && probe.code !== null;",
+    "expect": "已送達的提示遇 git 暫時失敗",
+    "script": "verify-update.mjs"
+  },
+  {
     "name": "已交代清單不參與去重",
     "file": "src/core/updater.ts",
     "from": "        const shown = [...state.shownActions, ",

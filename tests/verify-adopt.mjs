@@ -300,7 +300,8 @@ try {
     const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, encoding: 'utf8', windowsHide: true });
     assert.equal(head.status, 0, head.stderr);
     const noticePath = join(dir, 'update.json');
-    atomicJson(noticePath, { notice: 'fixture update notice', lastApplied: { at: new Date().toISOString(), from: 'old',
+    // from 要是真的 commit：新版啟動會用 from..to 重算待辦，算不出來（git 失敗）且沒送達就保留提示。
+    atomicJson(noticePath, { notice: 'fixture update notice', lastApplied: { at: new Date().toISOString(), from: head.stdout.trim(),
       to: head.stdout.trim(), ok: true, commits: [], message: 'fixture update notice' } });
     const before = contents(noticePath), jobFiles = jobs.map(f => snapshot(f.directory));
     const env = { ...process.env, AI_CLI_STATE_DIR: dir, AI_CLI_UPDATE_REPO_ROOT: ROOT, AI_CLI_UPDATE_SKIP_STARTUP: '' };
