@@ -5,7 +5,7 @@
  */
 import '../tools/stubs/catalog-test-env.mjs';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -405,6 +405,18 @@ try {
       check('★ 提問沒送到模型面前就重開：新版啟動保留提問', kept.includes('【要問使用者】') && kept.includes('0.1.4')
         && kept.includes('件事需要你在這台機器上動手') && !kept.includes('請重新啟動 MCP'), kept);
       check('新版啟動重寫提示後送達標記歸零', getUpdateStatus().noticeDelivered === null);
+      // 同機還沒重開的舊版 server 只認「notice 等於 lastApplied.message」，寫狀態時還會丟掉新欄位。
+      const rebuilt = disk(f);
+      check('新版重建待辦時把 lastApplied.message 同步成它', rebuilt.lastApplied.message === rebuilt.notice, rebuilt.lastApplied.message);
+      writeFileSync(join(f.state, 'update.json'), JSON.stringify({ ...rebuilt,
+        noticeFromUpdate: undefined, pendingFrom: undefined, pendingTo: undefined, shownActions: undefined }));
+      await restart('panelOldServerWrote');
+      check('★ 新版重建的待辦被舊版 server 寫回：重開後仍保留提問', disk(f).notice === kept, disk(f).notice);
+      const statePath = join(f.state, 'update.json');
+      const stableAt = statSync(statePath).mtimeMs;
+      const quiet = await restart('panelQuiet');
+      check('★ 待辦沒變的重開：不重寫狀態也不回報', statSync(statePath).mtimeMs === stableAt && quiet.reason === undefined,
+        JSON.stringify(quiet.reason));
       check('run／models 讀到提示即記為送達', consumeNotice() === kept && disk(f).noticeDelivered === kept);
       await restart('panelDelivered');
       check('★ 提問送到模型面前之後重開：不再問', disk(f).notice === null, disk(f).notice);
@@ -443,6 +455,23 @@ try {
       check('下一次更新沒動到面板：不再問', !(disk(f).notice ?? '').includes('【要問使用者】'), disk(f).notice);
       await restart('panelUnrelated');
       check('下一次更新沒動到面板：重開後也不補問', disk(f).notice === null, disk(f).notice);
+      // 待辦還沒交代完時更新失敗回滾：失敗紀錄取代 lastApplied，待辦的範圍不能跟著丟掉。
+      // 用舊版 updater 的寫法（範圍只能從 lastApplied 推得、提示裡沒有提問），才看得出範圍有沒有被保住。
+      const panelHead = head(f);
+      writeFileSync(join(f.state, 'update.json'), JSON.stringify({ ...disk(f),
+        lastApplied: { ...disk(f).lastApplied, from: beforePanel, to: panelHead, message: '舊版 updater 的提示' },
+        notice: '舊版 updater 的提示', noticeDelivered: null, noticeFromUpdate: undefined, pendingFrom: undefined, pendingTo: undefined, shownActions: undefined }));
+      commit(f, 'broken build', 'process.exit(1);', 'build.cjs');
+      await checkForUpdate({ force: true });
+      const failed = await applyUpdate();
+      await restart('panelRolledBack');
+      check('★ 待辦未交代時更新失敗回滾：重開後仍補問', failed.rolledBack === true && head(f) === panelHead
+        && disk(f).lastApplied?.ok === false && (disk(f).notice ?? '').includes('【要問使用者】'), JSON.stringify(failed.reason) + disk(f).notice);
+      // 回滾後 lastApplied 是失敗紀錄，「notice 等於 lastApplied.message」那條舊判斷認不得待辦；check 不能把它換成「有新版」。
+      activate(f, 'check');
+      await checkForUpdate({ force: true });
+      check('★ 回滾後 check 政策不清掉待辦', (disk(f).notice ?? '').includes('【要問使用者】'), disk(f).notice);
+      activate(f);
     } finally {
       if (saved === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = saved;
     }

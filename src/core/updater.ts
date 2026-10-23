@@ -28,6 +28,8 @@ export interface UpdateState {
   noticeFromUpdate: boolean;
   /** 還沒交代完的範圍起點：上一批沒送達又來一次更新時，從這裡接著算，不從這次的 from 算。 */
   pendingFrom: string | null;
+  /** 範圍終點。獨立記，不靠 lastApplied：更新失敗回滾會把 lastApplied 換成失敗紀錄（稽核第 2 輪）。 */
+  pendingTo: string | null;
   /** 這個範圍裡已經送到模型面前過的事；去重要看累積的，不能只看目前這一則。 */
   shownActions: string[];
 }
@@ -55,7 +57,7 @@ const GIT_TIMEOUT = 20_000;
 const emptyState = (): UpdateState => ({
   checkedAt: null, branch: null, local: null, remote: null, behind: 0,
   available: false, lastApplied: null, notice: null, noticeDelivered: null,
-  noticeFromUpdate: false, pendingFrom: null, shownActions: [],
+  noticeFromUpdate: false, pendingFrom: null, pendingTo: null, shownActions: [],
 });
 const messageOf = (error: unknown): string => error instanceof Error ? error.message : String(error);
 const repoOf = (options: UpdateOptions): string => resolve(options.repoRoot || process.env.AI_CLI_UPDATE_REPO_ROOT || DEFAULT_ROOT);
@@ -227,7 +229,7 @@ function readState(): UpdateState {
     const value = JSON.parse(readFileSync(statePath(), 'utf8'));
     if (!value || typeof value !== 'object' || Array.isArray(value)) return emptyState();
     const state = emptyState();
-    for (const key of ['checkedAt', 'branch', 'local', 'remote', 'notice', 'noticeDelivered', 'pendingFrom'] as const) {
+    for (const key of ['checkedAt', 'branch', 'local', 'remote', 'notice', 'noticeDelivered', 'pendingFrom', 'pendingTo'] as const) {
       if (typeof value[key] === 'string') state[key] = value[key];
     }
     state.noticeFromUpdate = value.noticeFromUpdate === true;
@@ -295,10 +297,16 @@ async function pendingActions(root: string, from: string, to: string, shown: rea
     .filter((action) => !shown.includes(action));
 }
 
-/** 這則 notice 是不是更新帶來、還沒送到模型面前的待辦。舊版 updater 不寫 noticeFromUpdate，就看它是不是更新訊息本身。 */
-function undeliveredUpdateNotice(state: UpdateState): boolean {
-  return !!state.lastApplied?.ok && state.notice !== null && state.noticeDelivered !== state.notice
-    && (state.noticeFromUpdate || state.notice === state.lastApplied.message);
+/**
+ * 這則 notice 若是更新帶來的待辦，回傳它涵蓋的範圍；不是（沒有 notice，或是 check 政策的「有新版」）回 null。
+ * 舊版 updater 不寫 noticeFromUpdate／pendingFrom／pendingTo，就看 notice 是不是上次成功更新的訊息本身，範圍取那次更新。
+ */
+function pendingRange(state: UpdateState): { from: string; to: string } | null {
+  const last = state.lastApplied?.ok ? state.lastApplied : null;
+  if (state.notice === null || !(state.noticeFromUpdate || state.notice === last?.message)) return null;
+  const from = state.pendingFrom ?? last?.from;
+  const to = state.pendingTo ?? last?.to;
+  return from && to ? { from, to } : null;
 }
 
 /** shell 只用於 Windows npm.cmd；參數均為程式內固定值，git 參數不經 shell。 */
@@ -421,8 +429,7 @@ export async function checkForUpdate(options: UpdateOptions = {}): Promise<Updat
     // 網路等待後重讀，保留別的 process 剛寫入的成功紀錄與提示。
     const state: UpdateState = { ...readState(), checkedAt: new Date().toISOString(), branch, local, remote, behind, available: behind > 0 };
     // 更新帶來的待辦（含新版啟動重建的那則）不能被「有新版／沒新版」的檢查結果蓋掉。
-    const pendingRestart = state.lastApplied?.ok && state.notice !== null
-      && (state.notice === state.lastApplied.message || state.noticeFromUpdate);
+    const pendingRestart = pendingRange(state) !== null;
     if (status.policy === 'check' && !pendingRestart) {
       state.notice = url ? `ai-cli 有新版（${local.slice(0, 7)} → ${remote.slice(0, 7)}，${behind} 個 commit），AI_CLI_AUTO_UPDATE=check 僅檢查；設為 on 後執行 ai-cli update。更新內容請至 ${url} 查看` : null;
       state.noticeFromUpdate = false;
@@ -497,8 +504,9 @@ export async function applyUpdate(options: UpdateOptions = {}): Promise<UpdateRe
     });
     // 上一批要動手的事還沒送到模型面前就又更新：從上一批的起點接著算，不能被這次的提示蓋掉（稽核第 2 輪）。
     const before = readState();
-    const carried = undeliveredUpdateNotice(before) && before.lastApplied!.to === prev;
-    const actionsFrom = carried ? before.pendingFrom ?? before.lastApplied!.from : prev;
+    const range = pendingRange(before);
+    const carried = range !== null && before.noticeDelivered !== before.notice && range.to === prev;
+    const actionsFrom = carried ? range.from : prev;
     const shownActions = carried ? before.shownActions : [];
     const actions = (actionsFrom === prev ? null : await pendingActions(root, actionsFrom, target, shownActions))
       ?? [...postUpdateActions(commits), ...bundledPluginActions(root, files)].filter((action) => !shownActions.includes(action));
@@ -506,7 +514,7 @@ export async function applyUpdate(options: UpdateOptions = {}): Promise<UpdateRe
     const state: UpdateState = { ...readState(), checkedAt: new Date().toISOString(), branch,
       local: target, remote: target, behind: 0, available: false,
       lastApplied: { at: new Date().toISOString(), from: prev, to: target, ok: true, commits, message: notice },
-      notice, noticeDelivered: null, noticeFromUpdate: true, pendingFrom: actionsFrom, shownActions,
+      notice, noticeDelivered: null, noticeFromUpdate: true, pendingFrom: actionsFrom, pendingTo: target, shownActions,
     };
     const writeError = writeState(state);
     if (writeError) throw new Error(writeError);
@@ -518,7 +526,11 @@ export async function applyUpdate(options: UpdateOptions = {}): Promise<UpdateRe
     const rebuild = await run('npm', ['run', 'build'], 5 * MINUTE);
     const rolledBack = reset.ok && rebuild.ok;
     if (!rolledBack) reason += '；回滾或重新建置失敗，請查看 log 並手動修復';
-    const state: UpdateState = { ...readState(), branch, local: reset.ok ? prev : target, remote: target,
+    const current = readState();
+    // 失敗紀錄會取代 lastApplied；待辦的範圍原本可能只由它推得（舊版 updater 寫的），先明確記下來。
+    const kept = pendingRange(current);
+    const state: UpdateState = { ...current, branch, local: reset.ok ? prev : target, remote: target,
+      ...(kept ? { noticeFromUpdate: true, pendingFrom: kept.from, pendingTo: kept.to } : {}),
       available: true, lastApplied: { at: new Date().toISOString(), from: prev, to: target, ok: false, commits: [], message: reason } };
     const writeError = writeState(state);
     if (writeError) reason += `；${writeError}`;
@@ -540,28 +552,35 @@ export function clearNoticeOnStartup(options: UpdateOptions = {}): Promise<Updat
       const state = readState();
       // 只有「這次真的清掉提示」才回報已是最新版；之後每次啟動都安靜，
       // 否則框架自動呼叫的 CLI（exec 等）每次都會在 stderr 多一行（獨立稽核 @gemini-3.1-pro 註記）。
-      if (state.lastApplied?.ok && state.lastApplied.to === head.stdout.trim() && state.notice !== null) {
+      const headSha = head.stdout.trim();
+      const range = pendingRange(state);
+      // 更新失敗回滾時 lastApplied 是失敗紀錄，待辦仍要照 pendingTo 認得（稽核第 2 輪）。
+      if (state.notice !== null && ((state.lastApplied?.ok && state.lastApplied.to === headSha) || range?.to === headSha)) {
         // 要動手的事由新版重算；已經在 run／models 回應裡送到模型面前的才算交代過。
         // 沒送到就重開的話，原本會連同提問一起清掉（稽核：DeepSeek V4.1 Flash）。
-        const last = state.lastApplied;
-        const from = state.pendingFrom ?? last.from;
-        const fromUpdate = state.noticeFromUpdate || state.notice === last.message;
         const delivered = state.noticeDelivered === state.notice;
-        // check 政策的「有新版」不是待辦，照舊清掉；待辦則重算，算不出來就整份保留原狀。
-        const all = fromUpdate ? await pendingActions(repoOf(options), from, last.to, []) : [];
+        // check 政策的「有新版」不是待辦（range 為 null），照舊清掉；待辦則重算，算不出來就整份保留原狀。
+        const all = range ? await pendingActions(repoOf(options), range.from, range.to, []) : [];
         if (all === null) return getUpdateStatus(options);
         const shown = [...state.shownActions, ...(delivered ? all.filter((action) => state.notice!.includes(action)) : [])];
         const pending = all.filter((action) => !shown.includes(action));
         // 等 git 的期間別的程序可能更新過或記了送達：狀態變了就不寫，交給下次啟動，不拿舊快照蓋掉新資料。
         const latest = readState();
         if (lockIsLive() || latest.notice !== state.notice || latest.noticeDelivered !== state.noticeDelivered
-          || latest.lastApplied?.to !== last.to) return getUpdateStatus(options);
-        const notice = pending.length
-          ? `ai-cli 上次更新（${from.slice(0, 7)} → ${last.to.slice(0, 7)}）有 ${pending.length} 件事需要你在這台機器上動手：\n\n${pending.join('\n\n')}`
+          || latest.lastApplied?.to !== state.lastApplied?.to || latest.pendingTo !== state.pendingTo) return getUpdateStatus(options);
+        const notice = range && pending.length
+          ? `ai-cli 上次更新（${range.from.slice(0, 7)} → ${range.to.slice(0, 7)}）有 ${pending.length} 件事需要你在這台機器上動手：\n\n${pending.join('\n\n')}`
           : null;
-        const writeError = writeState({ ...latest, notice, noticeDelivered: null, noticeFromUpdate: notice !== null,
-          pendingFrom: notice ? from : null, shownActions: notice ? shown : [] });
-        return { ...getUpdateStatus(options), reason: writeError ?? `ai-cli 已是最新版 ${head.stdout.trim().slice(0, 7)}` };
+        // 舊版 server 只認「notice 等於 lastApplied.message」，寫狀態時又會丟掉新欄位：message 同步成這則，
+        // 同機還沒重開的舊 server 做 check 時才不會清掉它，新版下次啟動也還認得（稽核第 2 輪）。
+        const lastApplied = notice && latest.lastApplied?.ok ? { ...latest.lastApplied, message: notice } : latest.lastApplied;
+        const next: UpdateState = { ...latest, lastApplied, notice, noticeDelivered: null, noticeFromUpdate: notice !== null,
+          pendingFrom: notice ? range!.from : null, pendingTo: notice ? range!.to : null, shownActions: notice ? shown : [] };
+        // 內容沒變（沒人送達、重算結果相同）就不寫也不回報（稽核第 2 輪）。
+        if (JSON.stringify(next) === JSON.stringify(latest)) return getUpdateStatus(options);
+        const writeError = writeState(next);
+        // 只有真的清掉提示才回報已是最新版；保留待辦時安靜。
+        return { ...getUpdateStatus(options), ...(writeError || notice === null ? { reason: writeError ?? `ai-cli 已是最新版 ${headSha.slice(0, 7)}` } : {}) };
       }
     }
     return getUpdateStatus(options);

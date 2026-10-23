@@ -410,8 +410,8 @@
     "name": "更新成功不寫 notice",
     "file": "src/core/updater.ts",
     "script": "verify-update.mjs",
-    "from": "      notice, noticeDelivered: null, noticeFromUpdate: true, pendingFrom: actionsFrom, shownActions,\n    };",
-    "to": "      notice: null, noticeDelivered: null, noticeFromUpdate: true, pendingFrom: actionsFrom, shownActions,\n    };",
+    "from": "      notice, noticeDelivered: null, noticeFromUpdate: true, pendingFrom: actionsFrom, pendingTo: target, shownActions,\n    };",
+    "to": "      notice: null, noticeDelivered: null, noticeFromUpdate: true, pendingFrom: actionsFrom, pendingTo: target, shownActions,\n    };",
     "expect": "成功 notice 持續存在並含版本重連網址標題"
   },
   {
@@ -2969,7 +2969,7 @@
   {
     "name": "又來一次更新不延續上一批範圍",
     "file": "src/core/updater.ts",
-    "from": "    const actionsFrom = carried ? before.pendingFrom ?? before.lastApplied!.from : prev;",
+    "from": "    const actionsFrom = carried ? range.from : prev;",
     "to": "    const actionsFrom = prev;",
     "expect": "上一批沒送達又來一次更新",
     "script": "verify-update.mjs"
@@ -2977,9 +2977,41 @@
   {
     "name": "check 政策覆蓋更新帶來的待辦",
     "file": "src/core/updater.ts",
-    "from": "      && (state.notice === state.lastApplied.message || state.noticeFromUpdate);",
-    "to": "      && state.notice === state.lastApplied.message;",
-    "expect": "check 政策不清掉更新帶來的待辦",
+    "from": "    const pendingRestart = pendingRange(state) !== null;",
+    "to": "    const pendingRestart = !!state.lastApplied?.ok && state.notice === state.lastApplied.message;",
+    "expect": "回滾後 check 政策不清掉待辦",
+    "script": "verify-update.mjs"
+  },
+  {
+    "name": "更新失敗回滾時不保住待辦範圍",
+    "file": "src/core/updater.ts",
+    "from": "      ...(kept ? { noticeFromUpdate: true, pendingFrom: kept.from, pendingTo: kept.to } : {}),",
+    "to": "      ...({}),",
+    "expect": "待辦未交代時更新失敗回滾",
+    "script": "verify-update.mjs"
+  },
+  {
+    "name": "啟動只認成功的 lastApplied，不認 pendingTo",
+    "file": "src/core/updater.ts",
+    "from": "((state.lastApplied?.ok && state.lastApplied.to === headSha) || range?.to === headSha))",
+    "to": "(state.lastApplied?.ok && state.lastApplied.to === headSha))",
+    "expect": "待辦未交代時更新失敗回滾",
+    "script": "verify-update.mjs"
+  },
+  {
+    "name": "重建待辦不同步 lastApplied.message",
+    "file": "src/core/updater.ts",
+    "from": "        const lastApplied = notice && latest.lastApplied?.ok ? { ...latest.lastApplied, message: notice } : latest.lastApplied;",
+    "to": "        const lastApplied = latest.lastApplied;",
+    "expect": "新版重建的待辦被舊版 server 寫回",
+    "script": "verify-update.mjs"
+  },
+  {
+    "name": "待辦沒變也每次啟動重寫",
+    "file": "src/core/updater.ts",
+    "from": "        if (JSON.stringify(next) === JSON.stringify(latest)) return getUpdateStatus(options);",
+    "to": "        if (false) return getUpdateStatus(options);",
+    "expect": "待辦沒變的重開",
     "script": "verify-update.mjs"
   }
 ]
